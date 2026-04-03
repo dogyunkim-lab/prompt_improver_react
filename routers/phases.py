@@ -71,6 +71,12 @@ async def _run_and_queue(generator, run_id: int, phase: int):
             pass
     except Exception as e:
         logger.exception(f"[Phase {phase} / run {run_id}] 백그라운드 태스크 예외: {e}")
+        # 예외 시에도 done(failed) 이벤트 전송 — 프론트엔드 stuck 방지
+        err_ev1 = _le("error", f"Phase {phase} 내부 오류: {e}")
+        err_ev2 = _de("failed")
+        _event_buffers.setdefault(key, []).extend([err_ev1, err_ev2])
+        await q.put(err_ev1)
+        await q.put(err_ev2)
     finally:
         await q.put(None)
         _running_tasks.pop(key, None)
@@ -151,6 +157,7 @@ async def trigger_phase1(run_id: int, body: PhaseRunBody = PhaseRunBody()):
     finally:
         await db.close()
     get_queue(run_id, 1)
+    logger.info(f"[Phase 1] run_id={run_id}, reasoning={body.reasoning}")
     _create_phase_task(run_phase1(run_id, reasoning=body.reasoning), run_id, 1)
     return {"ok": True}
 
@@ -175,6 +182,7 @@ async def trigger_phase2(run_id: int, body: PhaseRunBody = PhaseRunBody()):
             raise HTTPException(status_code=400, detail="Phase 1이 완료되지 않았습니다.")
     finally:
         await db.close()
+    logger.info(f"[Phase 2] run_id={run_id}, reasoning={body.reasoning}")
     _create_phase_task(run_phase2(run_id, reasoning=body.reasoning), run_id, 2)
     return {"ok": True}
 
@@ -461,6 +469,7 @@ async def trigger_phase6(run_id: int, body: PhaseRunBody = PhaseRunBody()):
             raise HTTPException(status_code=400, detail="Phase 4가 완료되지 않았습니다.")
     finally:
         await db.close()
+    logger.info(f"[Phase 6] run_id={run_id}, reasoning={body.reasoning}")
     _create_phase_task(run_phase6(run_id, reasoning=body.reasoning), run_id, 6)
     return {"ok": True}
 
