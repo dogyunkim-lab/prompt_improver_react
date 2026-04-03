@@ -1,7 +1,7 @@
 import React, { useCallback, useState, useEffect } from 'react';
 import { usePhaseStore } from '../../stores/phaseStore';
 import { useRunStore } from '../../stores/runStore';
-import { useSSE } from '../../hooks/useSSE';
+import { useSSEBuffered } from '../../hooks/useSSEBuffered';
 import { LogBox } from '../shared/LogBox';
 import { runPhase, cancelPhase, selectCandidate } from '../../api/phases';
 import { saveUserGuide } from '../../api/uploads';
@@ -9,50 +9,79 @@ import { cn } from '../../utils/cn';
 import type { Candidate, CandidateNode } from '../../types';
 
 export const Phase2Panel: React.FC = () => {
-  const runStore = useRunStore();
-  const ps = usePhaseStore();
-  const runId = runStore.selectedRunId;
-  const runData = runStore.runData;
+  const selectedRunId = useRunStore((s) => s.selectedRunId);
+  const runData = useRunStore((s) => s.runData);
+  const loadRunData = useRunStore((s) => s.loadRunData);
+  const setRunningPhase = useRunStore((s) => s.setRunningPhase);
 
+  const phaseStatus = usePhaseStore((s) => s.phaseStatus);
+  const p2Candidates = usePhaseStore((s) => s.p2Candidates);
+  const p2DesignSummary = usePhaseStore((s) => s.p2DesignSummary);
+  const p2Logs = usePhaseStore((s) => s.p2Logs);
+  const p2Feedback = usePhaseStore((s) => s.p2Feedback);
+  const selectedCandidateId = usePhaseStore((s) => s.selectedCandidateId);
+
+  const setP2Candidates = usePhaseStore((s) => s.setP2Candidates);
+  const setP2DesignSummary = usePhaseStore((s) => s.setP2DesignSummary);
+  const setP2Logs = usePhaseStore((s) => s.setP2Logs);
+  const addP2Log = usePhaseStore((s) => s.addP2Log);
+  const clearP2Logs = usePhaseStore((s) => s.clearP2Logs);
+  const setP2LearningRate = usePhaseStore((s) => s.setP2LearningRate);
+  const setP2Feedback = usePhaseStore((s) => s.setP2Feedback);
+  const setSelectedCandidateId = usePhaseStore((s) => s.setSelectedCandidateId);
+  const setPhaseStatus = usePhaseStore((s) => s.setPhaseStatus);
+  const updatePhaseTabsFromRunData = usePhaseStore((s) => s.updatePhaseTabsFromRunData);
+
+  const runId = selectedRunId;
   const [userGuide, setUserGuide] = useState('');
-  const isRunning = ps.phaseStatus[2] === 'running';
+  const isRunning = phaseStatus[2] === 'running';
 
   // Load existing data
   useEffect(() => {
     if (!runData) return;
     if (runData.user_guide) setUserGuide(runData.user_guide);
-    if (runData.selected_candidate_id) ps.setSelectedCandidateId(runData.selected_candidate_id);
+    if (runData.selected_candidate_id) setSelectedCandidateId(runData.selected_candidate_id);
 
     const p2 = runData.phases?.[2];
-    if (p2?.candidates?.length) ps.setP2Candidates(p2.candidates);
+    if (p2?.candidates?.length) setP2Candidates(p2.candidates);
     const od = p2?.output_data as any | undefined;
-    if (od?.design_summary) ps.setP2DesignSummary(od.design_summary as string);
-    if (od?.learning_rate) ps.setP2LearningRate(od.learning_rate as string);
+    if (od?.design_summary) setP2DesignSummary(od.design_summary as string);
+    if (od?.learning_rate) setP2LearningRate(od.learning_rate as string);
+
+    // log_text 복원
+    if (p2?.log_text && p2Logs.length === 0) {
+      const restored = (p2.log_text as string).split('\n').filter(Boolean).map((line: string) => ({
+        level: 'info' as const,
+        message: line,
+        ts: '',
+      }));
+      setP2Logs(restored);
+    }
 
     // Phase 6 feedback
     const p6 = runData.phases?.[6];
     if (p6?.output_data) {
       const p6d = p6.output_data as any;
-      if (p6d.next_direction) ps.setP2Feedback(String(p6d.next_direction));
+      if (p6d.next_direction) setP2Feedback(String(p6d.next_direction));
     }
   }, [runData]);
 
   // SSE
-  useSSE(runId, 2, isRunning, {
-    onLog: (level, message, ts) => ps.addP2Log({ level: level as 'info', message, ts }),
+  useSSEBuffered(runId, 2, isRunning, {
+    onLog: (level, message, ts) => addP2Log({ level: level as 'info', message, ts }),
     onResult: (data) => {
       const d = data as any;
-      if (d.candidates) ps.setP2Candidates(d.candidates as Candidate[]);
-      if (d.design_summary) ps.setP2DesignSummary(d.design_summary as string);
-      if (d.learning_rate) ps.setP2LearningRate(d.learning_rate as string);
+      if (d.candidates) setP2Candidates(d.candidates as Candidate[]);
+      if (d.design_summary) setP2DesignSummary(d.design_summary as string);
+      if (d.learning_rate) setP2LearningRate(d.learning_rate as string);
     },
     onDone: async (status) => {
-      ps.setPhaseStatus(2, status === 'completed' ? 'completed' : 'failed');
-      runStore.setRunningPhase(runId!, null);
+      setPhaseStatus(2, status === 'completed' ? 'completed' : 'failed');
+      setRunningPhase(runId!, null);
       if (runId) {
         try {
-          const data = await runStore.loadRunData(runId);
-          ps.updatePhaseTabsFromRunData(data.phases || {});
+          const data = await loadRunData(runId);
+          updatePhaseTabsFromRunData(data.phases || {});
         } catch { /* ignore */ }
       }
     },
@@ -60,23 +89,22 @@ export const Phase2Panel: React.FC = () => {
 
   const onRun = useCallback(async () => {
     if (!runId) return;
-    // Save user guide first
     if (userGuide.trim()) {
       try { await saveUserGuide(runId, userGuide.trim()); } catch { /* ignore */ }
     }
-    ps.clearP2Logs();
-    ps.setP2Candidates([]);
-    ps.setP2DesignSummary('');
-    ps.setPhaseStatus(2, 'running');
-    runStore.setRunningPhase(runId, 2);
+    clearP2Logs();
+    setP2Candidates([]);
+    setP2DesignSummary('');
+    setPhaseStatus(2, 'running');
+    setRunningPhase(runId, 2);
     try {
       await runPhase(runId, 2);
     } catch (e) {
       alert('실행 오류: ' + (e as Error).message);
-      ps.setPhaseStatus(2, 'failed');
-      runStore.setRunningPhase(runId, null);
+      setPhaseStatus(2, 'failed');
+      setRunningPhase(runId, null);
     }
-  }, [runId, userGuide, ps, runStore]);
+  }, [runId, userGuide, clearP2Logs, setP2Candidates, setP2DesignSummary, setPhaseStatus, setRunningPhase]);
 
   const onCancel = useCallback(async () => {
     if (!runId) return;
@@ -87,26 +115,23 @@ export const Phase2Panel: React.FC = () => {
     if (!runId) return;
     try {
       await selectCandidate(runId, candidateId);
-      ps.setSelectedCandidateId(candidateId);
-      // Refresh run data
-      const data = await runStore.loadRunData(runId);
-      ps.updatePhaseTabsFromRunData(data.phases || {});
+      setSelectedCandidateId(candidateId);
+      const data = await loadRunData(runId);
+      updatePhaseTabsFromRunData(data.phases || {});
     } catch (e) {
       alert('선택 오류: ' + (e as Error).message);
     }
-  }, [runId, ps, runStore]);
+  }, [runId, setSelectedCandidateId, loadRunData, updatePhaseTabsFromRunData]);
 
   return (
     <div>
-      {/* Phase 6 feedback */}
-      {ps.p2Feedback && (
+      {p2Feedback && (
         <div className="mb-4 py-3.5 px-[18px] bg-[#f0f7ff] border border-[#b6d4fe] rounded-[10px]">
           <h4 className="text-xs text-[#1e40af] mb-2 font-semibold">이전 Run Phase 6 피드백 (자동 주입됨)</h4>
-          <div className="text-[13px] text-warm-text leading-relaxed whitespace-pre-wrap">{ps.p2Feedback}</div>
+          <div className="text-[13px] text-warm-text leading-relaxed whitespace-pre-wrap">{p2Feedback}</div>
         </div>
       )}
 
-      {/* User guide */}
       <div className="bg-warm-card rounded-[10px] p-4 mb-4 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
         <h4 className="text-[13px] text-[#555] mb-1 flex items-center gap-1.5">
           전략 가이드 <span className="text-[11px] text-warm-muted font-normal">(선택사항)</span>
@@ -123,31 +148,29 @@ export const Phase2Panel: React.FC = () => {
         />
       </div>
 
-      {/* Candidate cards */}
       <div className="flex gap-3 flex-wrap mb-5">
-        {ps.p2Candidates.length === 0 ? (
+        {p2Candidates.length === 0 ? (
           <div className="text-warm-muted text-sm">Phase 2 실행 후 결과가 표시됩니다.</div>
         ) : (
-          ps.p2Candidates.map((cand) => (
+          p2Candidates.map((cand) => (
             <CandidateCard
               key={cand.id}
               candidate={cand}
-              isSelected={ps.selectedCandidateId === cand.id}
+              isSelected={selectedCandidateId === cand.id}
               onSelect={() => onSelectCandidate(cand.id)}
             />
           ))
         )}
       </div>
 
-      {/* Design summary */}
       <div className="bg-warm-card rounded-[10px] p-4 mb-5 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
         <h4 className="text-[13px] text-[#555] mb-2.5">디자인 요약</h4>
         <div className="text-[13px] text-[#444] leading-relaxed whitespace-pre-wrap">
-          {ps.p2DesignSummary || <span className="text-warm-muted">Phase 2 실행 후 표시됩니다.</span>}
+          {p2DesignSummary || <span className="text-warm-muted">Phase 2 실행 후 표시됩니다.</span>}
         </div>
       </div>
 
-      <LogBox logs={ps.p2Logs} />
+      <LogBox logs={p2Logs} />
 
       <div className="flex items-center gap-3 flex-wrap">
         <button
@@ -189,7 +212,6 @@ const CandidateCard: React.FC<{
       <div className="text-[11px] text-warm-muted mb-2">{candidate.node_count}노드 · {candidate.mode}</div>
       <div className="text-xs text-[#555] mb-3 leading-normal">{candidate.design_rationale}</div>
 
-      {/* Node tabs */}
       {nodes.length > 1 && (
         <div className="flex gap-1 flex-wrap mb-2">
           {nodes.map((n, i) => (
@@ -208,7 +230,6 @@ const CandidateCard: React.FC<{
         </div>
       )}
 
-      {/* System / User tabs */}
       {currentNode && (
         <>
           <div className="flex gap-1 mb-1.5">

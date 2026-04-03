@@ -53,9 +53,12 @@ interface PhaseStore {
   // Phase 1 actions
   setP1Cases: (c: CaseResult[]) => void;
   addP1Case: (c: CaseResult) => void;
+  addP1Cases: (c: CaseResult[]) => void;
   setP1Sort: (s: SortState) => void;
   setP1Filter: (f: FilterState) => void;
+  setP1Logs: (l: LogEntry[]) => void;
   addP1Log: (l: LogEntry) => void;
+  addP1Logs: (l: LogEntry[]) => void;
   clearP1Logs: () => void;
   setP1Progress: (p: { current: number; total: number }) => void;
   setP1Charts: (eval_: ChartData | null, bucket: ChartData | null) => void;
@@ -64,6 +67,7 @@ interface PhaseStore {
   // Phase 2 actions
   setP2Candidates: (c: Candidate[]) => void;
   setP2DesignSummary: (s: string) => void;
+  setP2Logs: (l: LogEntry[]) => void;
   addP2Log: (l: LogEntry) => void;
   clearP2Logs: () => void;
   setP2LearningRate: (r: string) => void;
@@ -71,6 +75,7 @@ interface PhaseStore {
   setSelectedCandidateId: (id: number | null) => void;
 
   // Phase 3 actions
+  setP3Logs: (l: LogEntry[]) => void;
   addP3Log: (l: LogEntry) => void;
   clearP3Logs: () => void;
   setP3Progress: (p: { current: number; total: number }) => void;
@@ -79,7 +84,9 @@ interface PhaseStore {
   setP4Cases: (c: CaseResult[]) => void;
   setP4Sort: (s: SortState) => void;
   setP4Filter: (f: FilterState) => void;
+  setP4Logs: (l: LogEntry[]) => void;
   addP4Log: (l: LogEntry) => void;
+  addP4Logs: (l: LogEntry[]) => void;
   clearP4Logs: () => void;
   setP4Progress: (p: { current: number; total: number }) => void;
   setP4Scores: (s: PhaseStore['p4Scores']) => void;
@@ -91,6 +98,7 @@ interface PhaseStore {
 
   // Phase 6 actions
   setP6Data: (d: Phase6Data | null) => void;
+  setP6Logs: (l: LogEntry[]) => void;
   addP6Log: (l: LogEntry) => void;
   clearP6Logs: () => void;
   setP6LearningRate: (r: string) => void;
@@ -149,9 +157,12 @@ export const usePhaseStore = create<PhaseStore>((set) => ({
   // P1
   setP1Cases: (c) => set({ p1Cases: c }),
   addP1Case: (c) => set((s) => ({ p1Cases: [...s.p1Cases, c] })),
+  addP1Cases: (c) => set((s) => ({ p1Cases: [...s.p1Cases, ...c] })),
   setP1Sort: (s) => set({ p1Sort: s }),
   setP1Filter: (f) => set({ p1Filter: f }),
+  setP1Logs: (l) => set({ p1Logs: l }),
   addP1Log: (l) => set((s) => ({ p1Logs: [...s.p1Logs, l] })),
+  addP1Logs: (ls) => set((s) => ({ p1Logs: [...s.p1Logs, ...ls] })),
   clearP1Logs: () => set({ p1Logs: [] }),
   setP1Progress: (p) => set({ p1Progress: p }),
   setP1Charts: (eval_, bucket) => set({ p1EvalChart: eval_, p1BucketChart: bucket }),
@@ -160,6 +171,7 @@ export const usePhaseStore = create<PhaseStore>((set) => ({
   // P2
   setP2Candidates: (c) => set({ p2Candidates: c }),
   setP2DesignSummary: (s) => set({ p2DesignSummary: s }),
+  setP2Logs: (l) => set({ p2Logs: l }),
   addP2Log: (l) => set((s) => ({ p2Logs: [...s.p2Logs, l] })),
   clearP2Logs: () => set({ p2Logs: [] }),
   setP2LearningRate: (r) => set({ p2LearningRate: r }),
@@ -167,6 +179,7 @@ export const usePhaseStore = create<PhaseStore>((set) => ({
   setSelectedCandidateId: (id) => set({ selectedCandidateId: id }),
 
   // P3
+  setP3Logs: (l) => set({ p3Logs: l }),
   addP3Log: (l) => set((s) => ({ p3Logs: [...s.p3Logs, l] })),
   clearP3Logs: () => set({ p3Logs: [] }),
   setP3Progress: (p) => set({ p3Progress: p }),
@@ -175,7 +188,9 @@ export const usePhaseStore = create<PhaseStore>((set) => ({
   setP4Cases: (c) => set({ p4Cases: c }),
   setP4Sort: (s) => set({ p4Sort: s }),
   setP4Filter: (f) => set({ p4Filter: f }),
+  setP4Logs: (l) => set({ p4Logs: l }),
   addP4Log: (l) => set((s) => ({ p4Logs: [...s.p4Logs, l] })),
+  addP4Logs: (ls) => set((s) => ({ p4Logs: [...s.p4Logs, ...ls] })),
   clearP4Logs: () => set({ p4Logs: [] }),
   setP4Progress: (p) => set({ p4Progress: p }),
   setP4Scores: (s) => set({ p4Scores: s }),
@@ -187,6 +202,7 @@ export const usePhaseStore = create<PhaseStore>((set) => ({
 
   // P6
   setP6Data: (d) => set({ p6Data: d }),
+  setP6Logs: (l) => set({ p6Logs: l }),
   addP6Log: (l) => set((s) => ({ p6Logs: [...s.p6Logs, l] })),
   clearP6Logs: () => set({ p6Logs: [] }),
   setP6LearningRate: (r) => set({ p6LearningRate: r }),

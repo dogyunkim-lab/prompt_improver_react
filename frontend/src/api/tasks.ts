@@ -5,7 +5,7 @@ export function fetchTasks(): Promise<Task[]> {
   return apiFetch<Task[]>('/api/tasks');
 }
 
-export function createTask(data: { name: string; description?: string; generation_task?: string }): Promise<Task> {
+export function createTask(data: { name: string; description?: string; generation_task?: string; gpt_api_base?: string; gpt_api_key?: string; gpt_model?: string }): Promise<Task> {
   return apiFetch<Task>('/api/tasks', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -13,7 +13,7 @@ export function createTask(data: { name: string; description?: string; generatio
   });
 }
 
-export function updateTask(id: number, data: { name?: string; description?: string; generation_task?: string }): Promise<Task> {
+export function updateTask(id: number, data: { name?: string; description?: string; generation_task?: string; gpt_api_base?: string; gpt_api_key?: string; gpt_model?: string }): Promise<Task> {
   return apiFetch<Task>(`/api/tasks/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },

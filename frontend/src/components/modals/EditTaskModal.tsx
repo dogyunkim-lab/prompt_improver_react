@@ -9,12 +9,20 @@ export const EditTaskModal: React.FC = () => {
   const [name, setName] = useState('');
   const [desc, setDesc] = useState('');
   const [genType, setGenType] = useState('');
+  const [gptBase, setGptBase] = useState('');
+  const [gptKey, setGptKey] = useState('');
+  const [gptModel, setGptModel] = useState('');
+  const [showLLM, setShowLLM] = useState(false);
 
   useEffect(() => {
     if (editingTask) {
       setName(editingTask.name || '');
       setDesc(editingTask.description || '');
       setGenType(editingTask.generation_task || '');
+      setGptBase(editingTask.gpt_api_base || '');
+      setGptKey(editingTask.gpt_api_key || '');
+      setGptModel(editingTask.gpt_model || '');
+      setShowLLM(!!(editingTask.gpt_api_base || editingTask.gpt_api_key || editingTask.gpt_model));
     }
   }, [editingTask]);
 
@@ -26,6 +34,9 @@ export const EditTaskModal: React.FC = () => {
         name: name.trim(),
         description: desc.trim() || undefined,
         generation_task: genType.trim() || undefined,
+        gpt_api_base: gptBase.trim() || undefined,
+        gpt_api_key: gptKey.trim() || undefined,
+        gpt_model: gptModel.trim() || undefined,
       });
       closeModal();
     } catch (e) {
@@ -33,7 +44,7 @@ export const EditTaskModal: React.FC = () => {
     } finally {
       setSubmitting(false);
     }
-  }, [editingTask, name, desc, genType, updateTask, closeModal, setSubmitting]);
+  }, [editingTask, name, desc, genType, gptBase, gptKey, gptModel, updateTask, closeModal, setSubmitting]);
 
   return (
     <Modal
@@ -78,6 +89,45 @@ export const EditTaskModal: React.FC = () => {
           onChange={(e) => setGenType(e.target.value)}
         />
       </div>
+      <div className="mb-1">
+        <button
+          type="button"
+          className="text-xs text-ctp-mauve font-semibold hover:underline"
+          onClick={() => setShowLLM(!showLLM)}
+        >{showLLM ? '▾ LLM 설정 접기' : '▸ LLM 설정 (선택)'}</button>
+      </div>
+      {showLLM && (
+        <div className="pl-2 border-l-2 border-ctp-mauve/30 mb-3.5 space-y-2.5">
+          <div>
+            <label className="block text-xs text-[#666] mb-1 font-semibold">API Base URL</label>
+            <input
+              className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-mauve focus:outline-none"
+              placeholder="기본값 사용 시 비워두세요"
+              value={gptBase}
+              onChange={(e) => setGptBase(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-[#666] mb-1 font-semibold">API Key</label>
+            <input
+              type="password"
+              className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-mauve focus:outline-none"
+              placeholder="기본값 사용 시 비워두세요"
+              value={gptKey}
+              onChange={(e) => setGptKey(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-[#666] mb-1 font-semibold">모델명</label>
+            <input
+              className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-mauve focus:outline-none"
+              placeholder="기본값 사용 시 비워두세요"
+              value={gptModel}
+              onChange={(e) => setGptModel(e.target.value)}
+            />
+          </div>
+        </div>
+      )}
     </Modal>
   );
 };

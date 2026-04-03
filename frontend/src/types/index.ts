@@ -4,6 +4,9 @@ export interface Task {
   name: string;
   description?: string;
   generation_task?: string;
+  gpt_api_base?: string;
+  gpt_api_key?: string;
+  gpt_model?: string;
   created_at?: string;
   runs: Run[];
 }

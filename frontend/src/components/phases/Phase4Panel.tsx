@@ -55,6 +55,15 @@ export const Phase4Panel: React.FC = () => {
     if (p4.cases?.length) ps.setP4Cases(p4.cases);
     const od = p4.output_data as Record<string, unknown> | undefined;
     if (od?.scores) ps.setP4Scores(od.scores as typeof ps.p4Scores);
+    // log_text 복원
+    if (p4.log_text && ps.p4Logs.length === 0) {
+      const restored = (p4.log_text as string).split('\n').filter(Boolean).map((line: string) => ({
+        level: 'info' as const,
+        message: line,
+        ts: '',
+      }));
+      ps.setP4Logs(restored);
+    }
   }, [runData]);
 
   // SSE - Phase 4 streams progress and done events, cases come from API reload

@@ -1,7 +1,7 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { usePhaseStore } from '../../stores/phaseStore';
 import { useRunStore } from '../../stores/runStore';
-import { useSSE } from '../../hooks/useSSE';
+import { useSSEBuffered } from '../../hooks/useSSEBuffered';
 import { useTableSort } from '../../hooks/useTableSort';
 import { useTableFilter } from '../../hooks/useTableFilter';
 import { ScoreCards } from '../shared/ScoreCards';
@@ -52,10 +52,38 @@ const DETAIL_FIELDS = [
 ];
 
 export const Phase1Panel: React.FC = () => {
-  const runStore = useRunStore();
-  const ps = usePhaseStore();
-  const runId = runStore.selectedRunId;
-  const runData = runStore.runData;
+  const selectedRunId = useRunStore((s) => s.selectedRunId);
+  const runData = useRunStore((s) => s.runData);
+  const setSelectedRunId_unused = null; // not needed
+  const loadRunData = useRunStore((s) => s.loadRunData);
+  const setRunningPhase = useRunStore((s) => s.setRunningPhase);
+
+  // Granular selectors for phase store
+  const p1Cases = usePhaseStore((s) => s.p1Cases);
+  const p1Sort = usePhaseStore((s) => s.p1Sort);
+  const p1Filter = usePhaseStore((s) => s.p1Filter);
+  const p1Logs = usePhaseStore((s) => s.p1Logs);
+  const p1Progress = usePhaseStore((s) => s.p1Progress);
+  const p1EvalChart = usePhaseStore((s) => s.p1EvalChart);
+  const p1BucketChart = usePhaseStore((s) => s.p1BucketChart);
+  const p1Scores = usePhaseStore((s) => s.p1Scores);
+  const phaseStatus = usePhaseStore((s) => s.phaseStatus);
+
+  // Actions (stable refs)
+  const setP1Cases = usePhaseStore((s) => s.setP1Cases);
+  const addP1Cases = usePhaseStore((s) => s.addP1Cases);
+  const setP1Sort = usePhaseStore((s) => s.setP1Sort);
+  const setP1Filter = usePhaseStore((s) => s.setP1Filter);
+  const setP1Logs = usePhaseStore((s) => s.setP1Logs);
+  const addP1Logs = usePhaseStore((s) => s.addP1Logs);
+  const clearP1Logs = usePhaseStore((s) => s.clearP1Logs);
+  const setP1Progress = usePhaseStore((s) => s.setP1Progress);
+  const setP1Charts = usePhaseStore((s) => s.setP1Charts);
+  const setP1Scores = usePhaseStore((s) => s.setP1Scores);
+  const setPhaseStatus = usePhaseStore((s) => s.setPhaseStatus);
+  const updatePhaseTabsFromRunData = usePhaseStore((s) => s.updatePhaseTabsFromRunData);
+
+  const runId = selectedRunId;
 
   const [judgeFile, setJudgeFile] = useState<File | null>(null);
   const [promptFile, setPromptFile] = useState<File | null>(null);
@@ -63,26 +91,26 @@ export const Phase1Panel: React.FC = () => {
   const [promptFileName, setPromptFileName] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
 
-  const isRunning = ps.phaseStatus[1] === 'running';
+  const isRunning = phaseStatus[1] === 'running';
 
-  // SSE connection
-  useSSE(runId, 1, isRunning, {
-    onLog: (level, message, ts) => ps.addP1Log({ level: level as 'info', message, ts }),
-    onProgress: (current, total) => ps.setP1Progress({ current, total }),
-    onCase: (data) => ps.addP1Case(data as unknown as CaseResult),
+  // Buffered SSE connection
+  useSSEBuffered(runId, 1, isRunning, {
+    onLogBatch: (logs) => addP1Logs(logs.map((l) => ({ level: l.level as 'info', message: l.message, ts: l.ts }))),
+    onProgress: (current, total) => setP1Progress({ current, total }),
+    onCaseBatch: (cases) => addP1Cases(cases as CaseResult[]),
     onResult: (data) => {
       const d = data as Record<string, unknown>;
-      if (d.scores) ps.setP1Scores(d.scores as typeof ps.p1Scores);
-      if (d.eval_chart) ps.setP1Charts(d.eval_chart as { labels: string[]; values: number[] }, d.bucket_chart as { labels: string[]; values: number[] } | null);
-      if (d.cases && Array.isArray(d.cases)) ps.setP1Cases(d.cases as CaseResult[]);
+      if (d.scores) setP1Scores(d.scores as typeof p1Scores);
+      if (d.eval_chart) setP1Charts(d.eval_chart as { labels: string[]; values: number[] }, d.bucket_chart as { labels: string[]; values: number[] } | null);
+      if (d.cases && Array.isArray(d.cases)) setP1Cases(d.cases as CaseResult[]);
     },
     onDone: async (status) => {
-      ps.setPhaseStatus(1, status === 'completed' ? 'completed' : 'failed');
-      runStore.setRunningPhase(runId!, null);
+      setPhaseStatus(1, status === 'completed' ? 'completed' : 'failed');
+      setRunningPhase(runId!, null);
       if (runId) {
         try {
-          const data = await runStore.loadRunData(runId);
-          ps.updatePhaseTabsFromRunData(data.phases || {});
+          const data = await loadRunData(runId);
+          updatePhaseTabsFromRunData(data.phases || {});
         } catch { /* ignore */ }
       }
     },
@@ -92,10 +120,10 @@ export const Phase1Panel: React.FC = () => {
   React.useEffect(() => {
     if (!runData?.phases?.[1]) return;
     const p1 = runData.phases[1];
-    if (p1.cases?.length) ps.setP1Cases(p1.cases);
-    if (p1.eval_chart) ps.setP1Charts(p1.eval_chart, p1.bucket_chart || null);
+    if (p1.cases?.length) setP1Cases(p1.cases);
+    if (p1.eval_chart) setP1Charts(p1.eval_chart, p1.bucket_chart || null);
     const od = p1.output_data as Record<string, unknown> | undefined;
-    if (od?.scores) ps.setP1Scores(od.scores as typeof ps.p1Scores);
+    if (od?.scores) setP1Scores(od.scores as typeof p1Scores);
     // continue mode banner
     if (runData.start_mode === 'continue' && runData.judge_original_name) {
       setJudgeFileName(runData.judge_original_name);
@@ -103,14 +131,23 @@ export const Phase1Panel: React.FC = () => {
     if (runData.prompt_original_name) {
       setPromptFileName(runData.prompt_original_name);
     }
+    // log_text 복원
+    if (p1.log_text && p1Logs.length === 0) {
+      const restored = p1.log_text.split('\n').filter(Boolean).map((line: string) => ({
+        level: 'info' as const,
+        message: line,
+        ts: '',
+      }));
+      setP1Logs(restored);
+    }
   }, [runData]);
 
   // Table sort/filter
-  const { sorted, toggleSort } = useTableSort(ps.p1Cases as any[], ps.p1Sort, ps.setP1Sort);
-  const { filtered, setCol } = useTableFilter(sorted, ps.p1Filter, ps.setP1Filter);
+  const { sorted, toggleSort } = useTableSort(p1Cases as any[], p1Sort, setP1Sort);
+  const { filtered, setCol } = useTableFilter(sorted, p1Filter, setP1Filter);
 
   const scoreCards = useMemo(() => {
-    const s = ps.p1Scores;
+    const s = p1Scores;
     if (!s) return [
       { label: '정답+과답%', value: '—', sub: '정답 + 과답', variant: 'good' as const },
       { label: '정답%', value: '—', sub: '정확한 답변', variant: 'default' as const },
@@ -123,7 +160,7 @@ export const Phase1Panel: React.FC = () => {
       { label: '과답%', value: fmtPct(s.over), sub: '과도한 답변', variant: 'warn' as const },
       { label: '오답%', value: fmtPct(s.wrong), sub: '틀린 답변', variant: 'bad' as const },
     ];
-  }, [ps.p1Scores]);
+  }, [p1Scores]);
 
   const onUploadJudge = useCallback(async () => {
     if (!runId || !judgeFile) return;
@@ -153,21 +190,21 @@ export const Phase1Panel: React.FC = () => {
 
   const onRun = useCallback(async () => {
     if (!runId) return;
-    ps.clearP1Logs();
-    ps.setP1Cases([]);
-    ps.setP1Progress({ current: 0, total: 0 });
-    ps.setP1Scores(null);
-    ps.setP1Charts(null, null);
-    ps.setPhaseStatus(1, 'running');
-    runStore.setRunningPhase(runId, 1);
+    clearP1Logs();
+    setP1Cases([]);
+    setP1Progress({ current: 0, total: 0 });
+    setP1Scores(null);
+    setP1Charts(null, null);
+    setPhaseStatus(1, 'running');
+    setRunningPhase(runId, 1);
     try {
       await runPhase(runId, 1);
     } catch (e) {
       alert('실행 오류: ' + (e as Error).message);
-      ps.setPhaseStatus(1, 'failed');
-      runStore.setRunningPhase(runId, null);
+      setPhaseStatus(1, 'failed');
+      setRunningPhase(runId, null);
     }
-  }, [runId, ps, runStore]);
+  }, [runId, clearP1Logs, setP1Cases, setP1Progress, setP1Scores, setP1Charts, setPhaseStatus, setRunningPhase]);
 
   const onCancel = useCallback(async () => {
     if (!runId) return;
@@ -207,7 +244,7 @@ export const Phase1Panel: React.FC = () => {
 
       <div className="bg-warm-card rounded-[10px] p-4 mb-4 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
         <h4 className="text-[13px] text-[#555] mb-1">현재 요약 프롬프트 업로드 (선택)</h4>
-        <p className="text-[11px] text-warm-muted mb-2">현재 사용 중인 요약 프롬프트 TXT 파일을 제공하면, Phase 1 분석 시 프롬프트 누락/위반 여부를 정확히 판단할 수 있습니다.</p>
+        <p className="text-[11px] text-warm-muted mb-2">현재 사용 중인 요약 프롬프트 TXT 파일을 제공하면, Phase 1 분석 시 프롬프트 ��락/위반 여부를 정확히 판단할 수 있습니다.</p>
         <FileDropZone
           onFile={(f) => setPromptFile(f)}
           accept=".txt,.md"
@@ -219,7 +256,7 @@ export const Phase1Panel: React.FC = () => {
             className="py-2 px-4 bg-transparent text-ctp-mauve rounded-md font-semibold text-[13px] border border-ctp-mauve hover:bg-ctp-mauve/10 disabled:opacity-50"
             onClick={onUploadPrompt}
             disabled={!promptFile || uploading}
-          >프롬프트 업로드</button>
+          >���롬프트 업로드</button>
           {promptFileName && <span className="text-xs text-warm-muted">✓ {promptFileName}</span>}
         </div>
       </div>
@@ -231,11 +268,11 @@ export const Phase1Panel: React.FC = () => {
         <h4 className="text-[13px] text-[#555] mb-3">판정 분포</h4>
         <div className="flex gap-5 flex-wrap">
           <div className="flex-1 min-w-[200px]">
-            <EvalBarChart data={ps.p1EvalChart} />
+            <EvalBarChart data={p1EvalChart} />
           </div>
           <div className="flex-1 min-w-[200px]">
             <h4 className="text-xs text-warm-muted mb-2">오류 원인 분류 (오답/과답 케이스)</h4>
-            <BucketBarChart data={ps.p1BucketChart} />
+            <BucketBarChart data={p1BucketChart} />
           </div>
         </div>
       </div>
@@ -264,15 +301,15 @@ export const Phase1Panel: React.FC = () => {
         <h4 className="text-[13px] text-[#555] mb-3">케이스 목록</h4>
         <div className="flex gap-1.5 mb-2">
           <button className="py-1 px-2.5 text-xs border border-[#555] bg-[#2a2a2a] text-[#ccc] rounded cursor-pointer hover:bg-[#3a3a3a]"
-            onClick={() => downloadJSON(ps.p1Cases, `phase1_cases_run${runData?.run_number || ''}.json`)}>JSON ⬇</button>
+            onClick={() => downloadJSON(p1Cases, `phase1_cases_run${runData?.run_number || ''}.json`)}>JSON ⬇</button>
           <button className="py-1 px-2.5 text-xs border border-[#555] bg-[#2a2a2a] text-[#ccc] rounded cursor-pointer hover:bg-[#3a3a3a]"
-            onClick={() => downloadXLSX(ps.p1Cases, `phase1_cases_run${runData?.run_number || ''}.xlsx`)}>XLSX ⬇</button>
+            onClick={() => downloadXLSX(p1Cases, `phase1_cases_run${runData?.run_number || ''}.xlsx`)}>XLSX ⬇</button>
         </div>
         <DataTable
           columns={P1_COLUMNS}
           data={filtered as CaseResult[]}
-          sort={ps.p1Sort}
-          filter={ps.p1Filter}
+          sort={p1Sort}
+          filter={p1Filter}
           onSort={toggleSort}
           onFilter={setCol}
           renderDetail={(row) => <CaseDetail row={row} fields={DETAIL_FIELDS} />}
@@ -282,8 +319,8 @@ export const Phase1Panel: React.FC = () => {
         />
       </div>
 
-      <ProgressBar label="오답/과답 케이스 분석" current={ps.p1Progress.current} total={ps.p1Progress.total} hidden={ps.p1Progress.total === 0} />
-      <LogBox logs={ps.p1Logs} />
+      <ProgressBar label="오답/과답 케이스 분석" current={p1Progress.current} total={p1Progress.total} hidden={p1Progress.total === 0} />
+      <LogBox logs={p1Logs} />
 
       {/* Action bar */}
       <div className="flex items-center gap-3 flex-wrap">

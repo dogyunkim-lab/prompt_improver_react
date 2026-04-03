@@ -1,26 +1,48 @@
 import React, { useCallback, useState, useEffect } from 'react';
 import { usePhaseStore } from '../../stores/phaseStore';
 import { useRunStore } from '../../stores/runStore';
-import { useSSE } from '../../hooks/useSSE';
+import { useSSEBuffered } from '../../hooks/useSSEBuffered';
 import { LogBox } from '../shared/LogBox';
 import { ProgressBar } from '../shared/ProgressBar';
 import { connectDify, executeDify, cancelPhase } from '../../api/phases';
 import { cn } from '../../utils/cn';
 
 export const Phase3Panel: React.FC = () => {
-  const runStore = useRunStore();
-  const ps = usePhaseStore();
-  const runId = runStore.selectedRunId;
-  const runData = runStore.runData;
+  const selectedRunId = useRunStore((s) => s.selectedRunId);
+  const runData = useRunStore((s) => s.runData);
+  const loadRunData = useRunStore((s) => s.loadRunData);
+  const setRunningPhase = useRunStore((s) => s.setRunningPhase);
 
+  const phaseStatus = usePhaseStore((s) => s.phaseStatus);
+  const p3Logs = usePhaseStore((s) => s.p3Logs);
+  const p3Progress = usePhaseStore((s) => s.p3Progress);
+  const selectedCandidateId = usePhaseStore((s) => s.selectedCandidateId);
+
+  const setP3Logs = usePhaseStore((s) => s.setP3Logs);
+  const addP3Log = usePhaseStore((s) => s.addP3Log);
+  const clearP3Logs = usePhaseStore((s) => s.clearP3Logs);
+  const setP3Progress = usePhaseStore((s) => s.setP3Progress);
+  const setPhaseStatus = usePhaseStore((s) => s.setPhaseStatus);
+  const updatePhaseTabsFromRunData = usePhaseStore((s) => s.updatePhaseTabsFromRunData);
+
+  const runId = selectedRunId;
   const [objectId, setObjectId] = useState('');
   const [difyStatus, setDifyStatus] = useState<'none' | 'verified' | 'failed'>('none');
   const [difyMessage, setDifyMessage] = useState('');
 
-  const isRunning = ps.phaseStatus[3] === 'running';
+  const isRunning = phaseStatus[3] === 'running';
 
-  // Load existing dify connections
   useEffect(() => {
+    // log_text 복원
+    const p3 = runData?.phases?.[3];
+    if (p3?.log_text && p3Logs.length === 0) {
+      const restored = (p3.log_text as string).split('\n').filter(Boolean).map((line: string) => ({
+        level: 'info' as const,
+        message: line,
+        ts: '',
+      }));
+      setP3Logs(restored);
+    }
     if (!runData?.dify_connections?.length) return;
     const conn = runData.dify_connections[0];
     if (conn) {
@@ -29,17 +51,16 @@ export const Phase3Panel: React.FC = () => {
     }
   }, [runData]);
 
-  // SSE
-  useSSE(runId, 3, isRunning, {
-    onLog: (level, message, ts) => ps.addP3Log({ level: level as 'info', message, ts }),
-    onProgress: (current, total) => ps.setP3Progress({ current, total }),
+  useSSEBuffered(runId, 3, isRunning, {
+    onLog: (level, message, ts) => addP3Log({ level: level as 'info', message, ts }),
+    onProgress: (current, total) => setP3Progress({ current, total }),
     onDone: async (status) => {
-      ps.setPhaseStatus(3, status === 'completed' ? 'completed' : 'failed');
-      runStore.setRunningPhase(runId!, null);
+      setPhaseStatus(3, status === 'completed' ? 'completed' : 'failed');
+      setRunningPhase(runId!, null);
       if (runId) {
         try {
-          const data = await runStore.loadRunData(runId);
-          ps.updatePhaseTabsFromRunData(data.phases || {});
+          const data = await loadRunData(runId);
+          updatePhaseTabsFromRunData(data.phases || {});
         } catch { /* ignore */ }
       }
     },
@@ -49,43 +70,41 @@ export const Phase3Panel: React.FC = () => {
     if (!runId || !objectId.trim()) return;
     setDifyMessage('');
     try {
-      const res = await connectDify(runId, objectId.trim(), ps.selectedCandidateId || undefined);
+      const res = await connectDify(runId, objectId.trim(), selectedCandidateId || undefined);
       setDifyStatus(res.status === 'verified' || res.verified ? 'verified' : 'failed');
       setDifyMessage(res.message || (res.verified ? '✓ 연결 성공' : '✕ 연결 실패'));
     } catch (e) {
       setDifyStatus('failed');
       setDifyMessage('연결 오류: ' + (e as Error).message);
     }
-  }, [runId, objectId, ps.selectedCandidateId]);
+  }, [runId, objectId, selectedCandidateId]);
 
   const onExecute = useCallback(async () => {
     if (!runId) return;
-    ps.clearP3Logs();
-    ps.setP3Progress({ current: 0, total: 0 });
-    ps.setPhaseStatus(3, 'running');
-    runStore.setRunningPhase(runId, 3);
+    clearP3Logs();
+    setP3Progress({ current: 0, total: 0 });
+    setPhaseStatus(3, 'running');
+    setRunningPhase(runId, 3);
     try {
       await executeDify(runId);
     } catch (e) {
       alert('실행 오류: ' + (e as Error).message);
-      ps.setPhaseStatus(3, 'failed');
-      runStore.setRunningPhase(runId, null);
+      setPhaseStatus(3, 'failed');
+      setRunningPhase(runId, null);
     }
-  }, [runId, ps, runStore]);
+  }, [runId, clearP3Logs, setP3Progress, setPhaseStatus, setRunningPhase]);
 
   const onCancel = useCallback(async () => {
     if (!runId) return;
     try { await cancelPhase(runId, 3); } catch { /* ignore */ }
   }, [runId]);
 
-  // Selected candidate info
   const selectedCand = runData?.phases?.[2]?.candidates?.find(
-    (c) => c.id === (runData.selected_candidate_id || ps.selectedCandidateId),
+    (c) => c.id === (runData.selected_candidate_id || selectedCandidateId),
   );
 
   return (
     <div>
-      {/* Selected candidate info */}
       <div className="bg-warm-card rounded-[10px] p-4 mb-4 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
         {selectedCand ? (
           <div>
@@ -98,7 +117,6 @@ export const Phase3Panel: React.FC = () => {
         )}
       </div>
 
-      {/* Dify connection */}
       <div className="bg-warm-card rounded-[10px] p-4 mb-4 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
         <h4 className="text-[13px] text-[#555] mb-3">Dify 워크플로우 연결</h4>
         <div className="flex items-center gap-3 flex-wrap">
@@ -126,8 +144,8 @@ export const Phase3Panel: React.FC = () => {
         )}
       </div>
 
-      <ProgressBar label="전체 케이스 실행 진행" current={ps.p3Progress.current} total={ps.p3Progress.total} />
-      <LogBox logs={ps.p3Logs} />
+      <ProgressBar label="전체 케이스 실행 진행" current={p3Progress.current} total={p3Progress.total} />
+      <LogBox logs={p3Logs} />
 
       <div className="flex items-center gap-3 flex-wrap">
         <button

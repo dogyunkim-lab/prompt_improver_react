@@ -23,6 +23,15 @@ export const Phase6Panel: React.FC = () => {
     const p6 = runData.phases[6];
     const od = p6.output_data as Phase6Data | undefined;
     if (od) ps.setP6Data(od);
+    // log_text 복원
+    if (p6.log_text && ps.p6Logs.length === 0) {
+      const restored = (p6.log_text as string).split('\n').filter(Boolean).map((line: string) => ({
+        level: 'info' as const,
+        message: line,
+        ts: '',
+      }));
+      ps.setP6Logs(restored);
+    }
   }, [runData]);
 
   // SSE
