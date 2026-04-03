@@ -4,9 +4,9 @@ import logging
 from datetime import datetime
 from typing import AsyncGenerator
 from database import get_db
-from services.gpt_client import call_gpt
+from services.gpt_client import call_gpt, get_task_gpt_config
 from services.delta import compute_learning_rate, count_completed_runs, get_run_scores
-from services.sse_helpers import log_event, result_event, done_event
+from services.sse_helpers import log_event, result_event, done_event, LogCollector
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +48,12 @@ def _build_candidates_with_nodes(saved_candidates: list) -> list:
                 })
         result.append({
             "id": cand["id"],
-            "label": cand["candidate_label"],
+            "run_id": cand.get("run_id"),
+            "candidate_label": cand["candidate_label"],
+            "mode": cand.get("mode", "explore"),
             "node_count": cand.get("node_count", len(node_prompts)),
-            "rationale": cand.get("design_rationale", ""),
-            "node_prompts": node_prompts,
+            "design_rationale": cand.get("design_rationale", ""),
+            "nodes": node_prompts,
         })
     return result
 
@@ -320,11 +322,11 @@ def _build_strategy_input(
     )
 
 
-async def _call_strategy_step(prompt: str, max_retries: int = 1) -> dict | None:
+async def _call_strategy_step(prompt: str, max_retries: int = 1, gpt_config: dict | None = None, reasoning: str = "high") -> dict | None:
     """Step 1: GPT에 전략 수립 요청. 실패 시 max_retries만큼 재시도."""
     for attempt in range(max_retries + 1):
         try:
-            raw = await call_gpt([{"role": "user", "content": prompt}], reasoning="high")
+            raw = await call_gpt([{"role": "user", "content": prompt}], reasoning=reasoning, **(gpt_config or {}))
             result = _extract_json(raw)
             candidates = result.get("candidates", [])
             if not candidates:
@@ -404,7 +406,9 @@ async def _generate_single_candidate(
     task: dict, improvable_cases: list,
     max_retries: int = 1,
     user_guide: str = "",
-    reference_style_profile: str = ""
+    reference_style_profile: str = "",
+    gpt_config: dict | None = None,
+    reasoning: str = "high",
 ) -> dict | None:
     """Step 2: 개별 후보의 노드 프롬프트 생성. 실패 시 재시도."""
     label = strategy_candidate["label"]
@@ -440,7 +444,7 @@ async def _generate_single_candidate(
 
     for attempt in range(max_retries + 1):
         try:
-            raw = await call_gpt([{"role": "user", "content": prompt}], reasoning="high")
+            raw = await call_gpt([{"role": "user", "content": prompt}], reasoning=reasoning, **(gpt_config or {}))
             result = _extract_json(raw)
             nodes = result.get("nodes", [])
             if nodes:
@@ -483,7 +487,9 @@ def _validate_candidate(candidate: dict) -> list:
 
 
 async def _repair_candidate(
-    candidate: dict, missing_labels: list, task: dict
+    candidate: dict, missing_labels: list, task: dict,
+    gpt_config: dict | None = None,
+    reasoning: str = "high",
 ) -> dict:
     """누락된 노드만 GPT에 보정 요청."""
     # 기존 노드 텍스트 구성
@@ -512,7 +518,9 @@ async def _repair_candidate(
     )
 
     try:
-        raw = await call_gpt([{"role": "user", "content": prompt}], reasoning="medium")
+        # repair는 한 단계 낮은 reasoning 사용
+        repair_reasoning = {"high": "medium", "medium": "low", "low": "low"}.get(reasoning, "medium")
+        raw = await call_gpt([{"role": "user", "content": prompt}], reasoning=repair_reasoning, **(gpt_config or {}))
         result = _extract_json(raw)
         repaired = result.get("repaired_nodes", [])
 
@@ -596,7 +604,8 @@ async def _save_candidate_to_db(
 
 # ─── 메인 파이프라인 ────────────────────────────────────────────────────────
 
-async def run_phase2(run_id: int) -> AsyncGenerator[str, None]:
+async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str, None]:
+    collector = LogCollector()
     db = await get_db()
     try:
         async with db.execute("SELECT * FROM runs WHERE id=?", (run_id,)) as cursor:
@@ -604,6 +613,9 @@ async def run_phase2(run_id: int) -> AsyncGenerator[str, None]:
 
         async with db.execute("SELECT * FROM tasks WHERE id=?", (run["task_id"],)) as cursor:
             task = dict(await cursor.fetchone())
+
+        # 실험별 GPT 설정 로드
+        gpt_config = await get_task_gpt_config(run_id)
 
         # Phase 1 결과 조회
         async with db.execute(
@@ -613,7 +625,7 @@ async def run_phase2(run_id: int) -> AsyncGenerator[str, None]:
             p1_row = await cursor.fetchone()
 
         if not p1_row:
-            yield log_event("error", "Phase 1이 완료되지 않았습니다.")
+            yield collector.log("error", "Phase 1이 완료되지 않았습니다.")
             yield done_event("failed")
             return
 
@@ -664,28 +676,28 @@ async def run_phase2(run_id: int) -> AsyncGenerator[str, None]:
             )
             if prev_run_feedback:
                 if feedback_source_run == run["base_run_id"]:
-                    yield log_event("info", f"이전 Run #{feedback_source_run} Phase 6 피드백 주입됨")
+                    yield collector.log("info", f"이전 Run #{feedback_source_run} Phase 6 피드백 주입됨")
                 else:
-                    yield log_event("info", f"이전 Run #{run['base_run_id']}의 Phase 6 없음 → Run #{feedback_source_run} 피드백으로 대체")
+                    yield collector.log("info", f"이전 Run #{run['base_run_id']}의 Phase 6 없음 → Run #{feedback_source_run} 피드백으로 대체")
             else:
-                yield log_event("warn", f"이전 Run #{run['base_run_id']} 및 Task 내 Phase 6 피드백을 찾을 수 없습니다")
+                yield collector.log("warn", f"이전 Run #{run['base_run_id']} 및 Task 내 Phase 6 피드백을 찾을 수 없습니다")
 
         # 사용자 전략 가이드
         user_guide = run.get("user_guide") or ""
         if user_guide:
-            yield log_event("info", f"사용자 전략 가이드 반영: {user_guide[:80]}{'...' if len(user_guide) > 80 else ''}")
+            yield collector.log("info", f"사용자 전략 가이드 반영: {user_guide[:80]}{'...' if len(user_guide) > 80 else ''}")
 
         # Reference 요약 기준 프로파일
         reference_style_profile = phase1_summary.get("reference_summary_criteria", "")
         if reference_style_profile:
-            yield log_event("info", f"Reference 요약 기준 프로파일 로드됨 ({len(reference_style_profile)}자)")
+            yield collector.log("info", f"Reference 요약 기준 프로파일 로드됨 ({len(reference_style_profile)}자)")
 
-        yield log_event("info", f"Design mode: {design_mode}, Learning rate: {learning_rate}")
+        yield collector.log("info", f"Design mode: {design_mode}, Learning rate: {learning_rate}")
 
         # ════════════════════════════════════════════════════════════════════
         # Step 1/3: 전략 수립
         # ════════════════════════════════════════════════════════════════════
-        yield log_event("info", "Step 1/3: 후보 구조 전략 수립 중...")
+        yield collector.log("info", "Step 1/3: 후보 구조 전략 수립 중...")
 
         strategy_prompt = _build_strategy_input(
             task, phase1_summary, experiment_history,
@@ -693,10 +705,10 @@ async def run_phase2(run_id: int) -> AsyncGenerator[str, None]:
             prev_run_feedback=prev_run_feedback,
             user_guide=user_guide,
         )
-        strategy_result = await _call_strategy_step(strategy_prompt, max_retries=1)
+        strategy_result = await _call_strategy_step(strategy_prompt, max_retries=1, gpt_config=gpt_config, reasoning=reasoning)
 
         if not strategy_result:
-            yield log_event("error", "전략 수립 실패 — Phase 2를 중단합니다.")
+            yield collector.log("error", "전략 수립 실패 — Phase 2를 중단합니다.")
             yield done_event("failed")
             await _mark_phase_failed(run_id, 2)
             return
@@ -708,17 +720,19 @@ async def run_phase2(run_id: int) -> AsyncGenerator[str, None]:
             f"후보 {c['label']}: {c['node_count']}노드"
             for c in strategy_candidates
         )
-        yield log_event("ok", f"전략 수립 완료 — {node_desc}")
+        yield collector.log("ok", f"전략 수립 완료 — {node_desc}")
 
         # ════════════════════════════════════════════════════════════════════
         # Step 2/3: 후보별 프롬프트 생성 (병렬)
         # ════════════════════════════════════════════════════════════════════
-        yield log_event("info", "Step 2/3: 후보별 프롬프트 생성 중...")
+        yield collector.log("info", "Step 2/3: 후보별 프롬프트 생성 중...")
 
         generation_tasks = [
             _generate_single_candidate(sc, design_summary, task, improvable_cases,
                                        user_guide=user_guide,
-                                       reference_style_profile=reference_style_profile)
+                                       reference_style_profile=reference_style_profile,
+                                       gpt_config=gpt_config,
+                                       reasoning=reasoning)
             for sc in strategy_candidates
         ]
         generation_results = await asyncio.gather(*generation_tasks, return_exceptions=True)
@@ -726,16 +740,16 @@ async def run_phase2(run_id: int) -> AsyncGenerator[str, None]:
         generated_candidates = []
         for sc, gen_result in zip(strategy_candidates, generation_results):
             if isinstance(gen_result, Exception):
-                yield log_event("warn", f"후보 {sc['label']} 생성 실패: {gen_result}")
+                yield collector.log("warn", f"후보 {sc['label']} 생성 실패: {gen_result}")
             elif gen_result is None:
-                yield log_event("warn", f"후보 {sc['label']} 생성 실패 — 스킵")
+                yield collector.log("warn", f"후보 {sc['label']} 생성 실패 — 스킵")
             else:
                 node_count = len(gen_result.get("nodes", []))
-                yield log_event("ok", f"후보 {sc['label']} 생성 완료 ({node_count} 노드)")
+                yield collector.log("ok", f"후보 {sc['label']} 생성 완료 ({node_count} 노드)")
                 generated_candidates.append(gen_result)
 
         if not generated_candidates:
-            yield log_event("error", "모든 후보 생성 실패 — Phase 2를 중단합니다.")
+            yield collector.log("error", "모든 후보 생성 실패 — Phase 2를 중단합니다.")
             yield done_event("failed")
             await _mark_phase_failed(run_id, 2)
             return
@@ -743,22 +757,22 @@ async def run_phase2(run_id: int) -> AsyncGenerator[str, None]:
         # ════════════════════════════════════════════════════════════════════
         # Step 3/3: 검증 및 보정
         # ════════════════════════════════════════════════════════════════════
-        yield log_event("info", "Step 3/3: 검증 및 보정 중...")
+        yield collector.log("info", "Step 3/3: 검증 및 보정 중...")
 
         final_candidates = []
         for cand in generated_candidates:
             missing = _validate_candidate(cand)
             if not missing:
-                yield log_event("ok", f"후보 {cand['label']}: 검증 통과")
+                yield collector.log("ok", f"후보 {cand['label']}: 검증 통과")
                 final_candidates.append(cand)
             else:
-                yield log_event("warn", f"후보 {cand['label']}: 노드 {', '.join(missing)} 누락 — 보정 중...")
-                repaired = await _repair_candidate(cand, missing, task)
+                yield collector.log("warn", f"후보 {cand['label']}: 노드 {', '.join(missing)} 누락 — 보정 중...")
+                repaired = await _repair_candidate(cand, missing, task, gpt_config=gpt_config, reasoning=reasoning)
 
                 # 보정 후 재검증
                 still_missing = _validate_candidate(repaired)
                 if not still_missing:
-                    yield log_event("ok", f"후보 {repaired['label']}: 보정 완료")
+                    yield collector.log("ok", f"후보 {repaired['label']}: 보정 완료")
                     final_candidates.append(repaired)
                 else:
                     # node_count를 실제 수로 하향 조정
@@ -770,14 +784,14 @@ async def run_phase2(run_id: int) -> AsyncGenerator[str, None]:
                     ])
                     if actual_count > 0:
                         repaired["node_count"] = actual_count
-                        yield log_event("warn",
+                        yield collector.log("warn",
                             f"후보 {repaired['label']}: 보정 불완전 — node_count를 {actual_count}로 하향 조정")
                         final_candidates.append(repaired)
                     else:
-                        yield log_event("warn", f"후보 {repaired['label']}: 보정 실패 — 스킵")
+                        yield collector.log("warn", f"후보 {repaired['label']}: 보정 실패 — 스킵")
 
         if not final_candidates:
-            yield log_event("error", "모든 후보 검증 실패 — Phase 2를 중단합니다.")
+            yield collector.log("error", "모든 후보 검증 실패 — Phase 2를 중단합니다.")
             yield done_event("failed")
             await _mark_phase_failed(run_id, 2)
             return
@@ -789,7 +803,7 @@ async def run_phase2(run_id: int) -> AsyncGenerator[str, None]:
             await _save_candidate_to_db(db, run_id, cand, design_mode)
         await db.commit()
 
-        yield log_event("ok", f"{len(final_candidates)}개 프롬프트 후보 설계 완료")
+        yield collector.log("ok", f"{len(final_candidates)}개 프롬프트 후보 설계 완료")
 
         # DB에서 저장된 candidates 조회 후 node_prompts 배열로 변환
         async with db.execute(
@@ -811,8 +825,8 @@ async def run_phase2(run_id: int) -> AsyncGenerator[str, None]:
         }
 
         async with db.execute(
-            "UPDATE phase_results SET status='completed', output_data=?, completed_at=? WHERE run_id=? AND phase=2",
-            (json.dumps(output, ensure_ascii=False), datetime.utcnow().isoformat(), run_id)
+            "UPDATE phase_results SET status='completed', output_data=?, log_text=?, completed_at=? WHERE run_id=? AND phase=2",
+            (json.dumps(output, ensure_ascii=False), collector.get_text(), datetime.utcnow().isoformat(), run_id)
         ):
             pass
         await db.execute("UPDATE runs SET status='phase2_done' WHERE id=?", (run_id,))
@@ -822,7 +836,7 @@ async def run_phase2(run_id: int) -> AsyncGenerator[str, None]:
         yield done_event("completed")
 
     except Exception as e:
-        yield log_event("error", f"Phase 2 오류: {e}")
+        yield collector.log("error", f"Phase 2 오류: {e}")
         yield done_event("failed")
         await _mark_phase_failed(run_id, 2)
     finally:

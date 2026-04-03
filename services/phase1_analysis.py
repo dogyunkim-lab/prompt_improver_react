@@ -4,8 +4,8 @@ import os
 from datetime import datetime
 from typing import AsyncGenerator
 from database import get_db
-from services.gpt_client import call_gpt
-from services.sse_helpers import log_event, progress_event, result_event, done_event, case_event
+from services.gpt_client import call_gpt, get_task_gpt_config
+from services.sse_helpers import log_event, progress_event, result_event, done_event, case_event, LogCollector
 
 PROMPT_PATH = "prompts/phase1_analysis.txt"
 CONCURRENT = 5   # 동시 GPT 호출 수
@@ -40,7 +40,9 @@ def _detect_reason_field(cases: list) -> str:
 
 async def _call_gpt_case(case: dict, prompt_template: str, eval_field: str, reason_field: str,
                          current_prompt: str = "", generation_task: str = "",
-                         intermediate_outputs: str = "") -> dict:
+                         intermediate_outputs: str = "",
+                         gpt_config: dict | None = None,
+                         reasoning: str = "high") -> dict:
     """단일 케이스 GPT 분석. DB 조작 없음 — asyncio.gather에서 병렬 실행 가능."""
     case_prompt = prompt_template.format(
         stt=case.get("stt", ""),
@@ -54,13 +56,14 @@ async def _call_gpt_case(case: dict, prompt_template: str, eval_field: str, reas
         generation_task=generation_task,
         intermediate_outputs=intermediate_outputs or "(중간 출력 없음)",
     )
-    raw = await call_gpt([{"role": "user", "content": case_prompt}], reasoning="high")
+    raw = await call_gpt([{"role": "user", "content": case_prompt}], reasoning=reasoning, **(gpt_config or {}))
     result = _extract_json(raw)
     result["case_id"] = str(case.get("id", ""))  # case_id 항상 보장
     return result
 
 
-async def run_phase1(run_id: int) -> AsyncGenerator[str, None]:
+async def run_phase1(run_id: int, reasoning: str = "high") -> AsyncGenerator[str, None]:
+    collector = LogCollector()
     db = await get_db()
     try:
         async with db.execute("SELECT * FROM runs WHERE id=?", (run_id,)) as cursor:
@@ -70,6 +73,9 @@ async def run_phase1(run_id: int) -> AsyncGenerator[str, None]:
         async with db.execute("SELECT * FROM tasks WHERE id=?", (run["task_id"],)) as cursor:
             task = dict(await cursor.fetchone())
         generation_task = task.get("generation_task", "")
+
+        # 실험별 GPT 설정 로드
+        gpt_config = await get_task_gpt_config(run_id)
 
         # phase_result 초기화 (기존 output_data 보존)
         await db.execute(
@@ -85,7 +91,7 @@ async def run_phase1(run_id: int) -> AsyncGenerator[str, None]:
 
         judge_file = run.get("judge_file_path")
         if not judge_file or not os.path.exists(judge_file):
-            yield log_event("error", "Judge JSON 파일이 없습니다. 먼저 업로드하세요.")
+            yield collector.log("error", "Judge JSON 파일이 없습니다. 먼저 업로드하세요.")
             yield done_event("failed")
             await _mark_phase_failed(run_id, 1)
             return
@@ -96,11 +102,11 @@ async def run_phase1(run_id: int) -> AsyncGenerator[str, None]:
         if prompt_file and os.path.exists(prompt_file):
             with open(prompt_file, "r", encoding="utf-8") as f:
                 current_prompt = f.read().strip()
-            yield log_event("info", f"현재 요약 프롬프트 로드 완료 ({len(current_prompt)}자)")
+            yield collector.log("info", f"현재 요약 프롬프트 로드 완료 ({len(current_prompt)}자)")
         else:
-            yield log_event("warn", "현재 요약 프롬프트가 제공되지 않았습니다. 프롬프트 없이 분석합니다.")
+            yield collector.log("warn", "현재 요약 프롬프트가 제공되지 않았습니다. 프롬프트 없이 분석합니다.")
 
-        yield log_event("info", "Judge JSON 파일 파싱 중...")
+        yield collector.log("info", "Judge JSON 파일 파싱 중...")
         with open(judge_file, "r", encoding="utf-8") as f:
             judge_data = json.load(f)
 
@@ -109,39 +115,39 @@ async def run_phase1(run_id: int) -> AsyncGenerator[str, None]:
             list_values = [(k, v) for k, v in judge_data.items() if isinstance(v, list)]
             if list_values:
                 key, judge_data = max(list_values, key=lambda x: len(x[1]))
-                yield log_event("info", f"JSON 키 '{key}'에서 {len(judge_data)}개 케이스 추출")
+                yield collector.log("info", f"JSON 키 '{key}'에서 {len(judge_data)}개 케이스 추출")
             else:
-                yield log_event("error", f"JSON 형식 오류: dict에 list가 없습니다. 키 목록: {list(judge_data.keys())}")
+                yield collector.log("error", f"JSON 형식 오류: dict에 list가 없습니다. 키 목록: {list(judge_data.keys())}")
                 yield done_event("failed")
                 await _mark_phase_failed(run_id, 1)
                 return
 
         if not isinstance(judge_data, list):
-            yield log_event("error", f"JSON 형식 오류: list 또는 dict가 필요합니다. 실제 타입: {type(judge_data).__name__}")
+            yield collector.log("error", f"JSON 형식 오류: list 또는 dict가 필요합니다. 실제 타입: {type(judge_data).__name__}")
             yield done_event("failed")
             await _mark_phase_failed(run_id, 1)
             return
 
         judge_data = [c for c in judge_data if isinstance(c, dict)]
         if not judge_data:
-            yield log_event("error", "JSON 파일에서 유효한 케이스(dict 형식)를 찾을 수 없습니다.")
+            yield collector.log("error", "JSON 파일에서 유효한 케이스(dict 형식)를 찾을 수 없습니다.")
             yield done_event("failed")
             await _mark_phase_failed(run_id, 1)
             return
 
-        yield log_event("info", f"감지된 필드: {list(judge_data[0].keys())}")
+        yield collector.log("info", f"감지된 필드: {list(judge_data[0].keys())}")
 
         # 판정/사유 필드명 자동 감지
         eval_field = _detect_eval_field(judge_data)
         reason_field = _detect_reason_field(judge_data)
-        yield log_event("info", f"판정 필드: '{eval_field}' | 사유 필드: '{reason_field}'")
+        yield collector.log("info", f"판정 필드: '{eval_field}' | 사유 필드: '{reason_field}'")
 
         # 오답/과답 케이스 추출
         error_cases = [c for c in judge_data if c.get(eval_field) in ("오답", "과답")]
         total_cases = len(judge_data)
         error_count = len(error_cases)
 
-        yield log_event("info", f"전체 {total_cases}건 중 오답/과답 {error_count}건 분석 시작")
+        yield collector.log("info", f"전체 {total_cases}건 중 오답/과답 {error_count}건 분석 시작")
 
         # 재실행 시 기존 케이스 데이터 삭제 (이전 파일 데이터가 남지 않도록)
         await db.execute("DELETE FROM case_results WHERE run_id=?", (run_id,))
@@ -179,7 +185,7 @@ async def run_phase1(run_id: int) -> AsyncGenerator[str, None]:
                 })
 
         if error_count == 0:
-            yield log_event("ok", "오답/과답 케이스가 없습니다. Phase 1 완료.")
+            yield collector.log("ok", "오답/과답 케이스가 없습니다. Phase 1 완료.")
             correct_count = sum(1 for c in judge_data if c.get(eval_field) == "정답")
             over_count    = sum(1 for c in judge_data if c.get(eval_field) == "과답")
             wrong_count   = sum(1 for c in judge_data if c.get(eval_field) == "오답")
@@ -206,6 +212,9 @@ async def run_phase1(run_id: int) -> AsyncGenerator[str, None]:
                 },
             }
             await _mark_phase_completed(run_id, 1, zero_summary)
+            await db.execute("UPDATE phase_results SET log_text=? WHERE run_id=? AND phase=1",
+                             (collector.get_text(), run_id))
+            await db.commit()
             yield result_event(zero_summary)
             yield done_event("completed")
             return
@@ -225,7 +234,7 @@ async def run_phase1(run_id: int) -> AsyncGenerator[str, None]:
                     for row in await cursor.fetchall():
                         prev_intermediate_map[row["case_id"]] = row["intermediate_outputs"]
                 if prev_intermediate_map:
-                    yield log_event("info", f"이전 Run의 중간 출력 {len(prev_intermediate_map)}건 로드됨")
+                    yield collector.log("info", f"이전 Run의 중간 출력 {len(prev_intermediate_map)}건 로드됨")
             except Exception:
                 pass  # 마이그레이션 전 DB 호환
 
@@ -236,13 +245,15 @@ async def run_phase1(run_id: int) -> AsyncGenerator[str, None]:
                 return await _call_gpt_case(c, prompt_template, eval_field, reason_field,
                                             current_prompt=current_prompt,
                                             generation_task=generation_task,
-                                            intermediate_outputs=case_intermediate)
+                                            intermediate_outputs=case_intermediate,
+                                            gpt_config=gpt_config,
+                                            reasoning=reasoning)
 
         # ── 배치 병렬 분석 ────────────────────────────────────────────────────
         done_count = 0
         for i in range(0, error_count, CONCURRENT):
             batch = error_cases[i:i + CONCURRENT]
-            yield log_event("info", f"케이스 {i+1}~{min(i+len(batch), error_count)} 병렬 분석 중...")
+            yield collector.log("info", f"케이스 {i+1}~{min(i+len(batch), error_count)} 병렬 분석 중...")
 
             outcomes = await asyncio.gather(
                 *[_analyze_with_sem(c) for c in batch],
@@ -252,7 +263,7 @@ async def run_phase1(run_id: int) -> AsyncGenerator[str, None]:
             for case, outcome in zip(batch, outcomes):
                 done_count += 1
                 if isinstance(outcome, Exception):
-                    yield log_event("warn", f"케이스 {case.get('id', '?')} 분석 실패: {outcome}")
+                    yield collector.log("warn", f"케이스 {case.get('id', '?')} 분석 실패: {outcome}")
                     result = {"case_id": str(case.get("id", "")), "bucket": "prompt_missing",
                               "analysis_summary": "", "stt_uncertain_expressions": [],
                               "hallucination_detected": False, "judge_agreement": True,
@@ -314,7 +325,7 @@ async def run_phase1(run_id: int) -> AsyncGenerator[str, None]:
                 secondary = result.get("secondary_bucket")
                 if secondary:
                     bucket_label += f"+{secondary}"
-                yield log_event("ok", f"케이스 {case.get('id', '?')} → {bucket_label}")
+                yield collector.log("ok", f"케이스 {case.get('id', '?')} → {bucket_label}")
                 yield case_event({
                     "id": str(case.get("id", "")),
                     "judge": case.get(eval_field, ""),
@@ -338,9 +349,9 @@ async def run_phase1(run_id: int) -> AsyncGenerator[str, None]:
             yield progress_event(done_count, error_count)
 
         # ── 전체 패턴 요약 ────────────────────────────────────────────────────
-        yield log_event("info", "전체 패턴 요약 생성 중...")
-        summary = await _summarize_all(case_analyses, error_count)
-        yield log_event("ok", f"분석 완료 — 주요 이슈: {', '.join(summary.get('top_issues', []))}")
+        yield collector.log("info", "전체 패턴 요약 생성 중...")
+        summary = await _summarize_all(case_analyses, error_count, gpt_config=gpt_config, reasoning=reasoning)
+        yield collector.log("ok", f"분석 완료 — 주요 이슈: {', '.join(summary.get('top_issues', []))}")
 
         # baseline 점수 추가
         correct_count = sum(1 for c in judge_data if c.get(eval_field) == "정답")
@@ -375,6 +386,8 @@ async def run_phase1(run_id: int) -> AsyncGenerator[str, None]:
         }
 
         await _mark_phase_completed(run_id, 1, summary)
+        await db.execute("UPDATE phase_results SET log_text=? WHERE run_id=? AND phase=1",
+                         (collector.get_text(), run_id))
         await db.execute("UPDATE runs SET status='phase1_done' WHERE id=?", (run_id,))
         await db.commit()
 
@@ -382,7 +395,7 @@ async def run_phase1(run_id: int) -> AsyncGenerator[str, None]:
         yield done_event("completed")
 
     except Exception as e:
-        yield log_event("error", f"Phase 1 오류: {e}")
+        yield collector.log("error", f"Phase 1 오류: {e}")
         yield done_event("failed")
         await _mark_phase_failed(run_id, 1)
     finally:
@@ -412,7 +425,7 @@ def _extract_json(text: str) -> dict:
     return {}
 
 
-async def _summarize_all(case_analyses: list, n: int) -> dict:
+async def _summarize_all(case_analyses: list, n: int, gpt_config: dict | None = None, reasoning: str = "high") -> dict:
     """
     버킷별 집계는 직접 계산 (GPT 의존 없음).
     top_issues / recommended_focus만 GPT에게 요청.
@@ -522,7 +535,7 @@ async def _summarize_all(case_analyses: list, n: int) -> dict:
     reference_summary_criteria = ""
     common_content_gaps = ""
     try:
-        raw = await call_gpt([{"role": "user", "content": prompt}], reasoning="high")
+        raw = await call_gpt([{"role": "user", "content": prompt}], reasoning=reasoning, **(gpt_config or {}))
         gpt = _extract_json(raw)
         top_issues = gpt.get("top_issues", [])
         recommended_focus = gpt.get("recommended_focus", "")

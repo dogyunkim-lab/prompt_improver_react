@@ -161,6 +161,10 @@ async def init_db():
             "ALTER TABLE prompt_candidates ADD COLUMN node_c_output_var TEXT",
             # Phase 3 중간 노드 출력 저장 (case_results)
             "ALTER TABLE case_results ADD COLUMN intermediate_outputs TEXT",
+            # 실험별 LLM 설정 (tasks)
+            "ALTER TABLE tasks ADD COLUMN gpt_api_base TEXT",
+            "ALTER TABLE tasks ADD COLUMN gpt_api_key TEXT",
+            "ALTER TABLE tasks ADD COLUMN gpt_model TEXT",
         ]
         for stmt in _migration_stmts:
             try:

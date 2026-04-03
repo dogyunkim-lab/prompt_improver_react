@@ -1,8 +1,13 @@
 import { apiFetch } from './client';
 import type { Phase5Data } from '../types';
 
-export function runPhase(runId: number, phase: number) {
-  return apiFetch<{ ok: boolean }>(`/api/runs/${runId}/phase/${phase}/run`, { method: 'POST' });
+export function runPhase(runId: number, phase: number, reasoning?: string) {
+  const opts: RequestInit = { method: 'POST' };
+  if (reasoning) {
+    opts.headers = { 'Content-Type': 'application/json' };
+    opts.body = JSON.stringify({ reasoning });
+  }
+  return apiFetch<{ ok: boolean }>(`/api/runs/${runId}/phase/${phase}/run`, opts);
 }
 
 export function cancelPhase(runId: number, phase: number) {

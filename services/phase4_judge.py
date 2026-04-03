@@ -3,9 +3,9 @@ import json
 from datetime import datetime
 from typing import AsyncGenerator
 from database import get_db
-from services.gpt_client import call_gpt
+from services.gpt_client import call_gpt, get_task_gpt_config
 from services.delta import compute_and_save_deltas, aggregate_scores
-from services.sse_helpers import log_event, progress_event, result_event, done_event
+from services.sse_helpers import log_event, progress_event, result_event, done_event, LogCollector
 
 SYSTEM_PROMPT_PATH = "prompts/phase4_judge_system.txt"
 USER_PROMPT_PATH = "prompts/phase4_judge_user.txt"
@@ -77,6 +77,7 @@ def _classify_from_text(raw_text: str) -> tuple:
 
 
 async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
+    collector = LogCollector()
     db = await get_db()
     try:
         async with db.execute("SELECT * FROM runs WHERE id=?", (run_id,)) as cursor:
@@ -89,7 +90,7 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
             cases = [dict(row) for row in await cursor.fetchall()]
 
         if not cases:
-            yield log_event("error", "생성된 요약 데이터가 없습니다. Phase 3을 먼저 실행하세요.")
+            yield collector.log("error", "생성된 요약 데이터가 없습니다. Phase 3을 먼저 실행하세요.")
             yield done_event("failed")
             return
 
@@ -103,15 +104,18 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
         await db.execute("UPDATE runs SET status='phase4_running', current_phase=4 WHERE id=?", (run_id,))
         await db.commit()
 
+        # 실험별 GPT 설정 로드
+        gpt_config = await get_task_gpt_config(run_id)
+
         judge_system = _load_prompt(SYSTEM_PROMPT_PATH)
         user_template = _load_prompt(USER_PROMPT_PATH)
         if not user_template:
-            yield log_event("error", f"User 프롬프트 템플릿이 없습니다: {USER_PROMPT_PATH}")
+            yield collector.log("error", f"User 프롬프트 템플릿이 없습니다: {USER_PROMPT_PATH}")
             yield done_event("failed")
             return
 
         total = len(cases)
-        yield log_event("info", f"Judge 실행 시작: {total}건")
+        yield collector.log("info", f"Judge 실행 시작: {total}건")
 
         semaphore = asyncio.Semaphore(JUDGE_CONCURRENCY)
         done_count = 0
@@ -131,7 +135,7 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
                     messages.append({"role": "system", "content": judge_system})
                 messages.append({"role": "user", "content": user_content})
                 try:
-                    raw = await call_gpt(messages, reasoning="low")
+                    raw = await call_gpt(messages, reasoning="low", **(gpt_config or {}))
                     result = _extract_json(raw)
                     # 실제 Judge와 동일: JSON에서 "rating" 키로 추출
                     evaluation = result.get("rating", "평가실패")
@@ -161,9 +165,9 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
                 eval_result = await coro
                 processed += 1
                 if not str(eval_result).startswith("error:"):
-                    yield log_event("ok", f"판정: {eval_result}")
+                    yield collector.log("ok", f"판정: {eval_result}")
                 else:
-                    yield log_event("warn", f"Judge 실패: {eval_result}")
+                    yield collector.log("warn", f"Judge 실패: {eval_result}")
                 yield progress_event(processed, total)
         finally:
             for t in pending_tasks:
@@ -172,7 +176,7 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
 
         # 점수 집계
         scores = await aggregate_scores(run_id)
-        yield log_event("ok", f"점수 집계 완료 — 정답+과답: {scores['score_total']}% (정답:{scores['score_correct']}% 과답:{scores['score_over']}%)")
+        yield collector.log("ok", f"점수 집계 완료 — 정답+과답: {scores['score_total']}% (정답:{scores['score_correct']}% 과답:{scores['score_over']}%)")
 
         # runs 점수 업데이트
         await db.execute(
@@ -197,9 +201,9 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
                 prev_run_id = prev_row["id"]
 
         if prev_run_id:
-            yield log_event("info", f"케이스별 Delta 계산 중... (비교 대상: Run #{prev_run_id})")
+            yield collector.log("info", f"케이스별 Delta 계산 중... (비교 대상: Run #{prev_run_id})")
             await compute_and_save_deltas(run["task_id"], prev_run_id, run_id)
-            yield log_event("ok", "Delta 계산 완료")
+            yield collector.log("ok", "Delta 계산 완료")
 
         # BUG-2: 프론트 기대 필드명으로 변환 (correct_plus_over, correct, over, wrong, total)
         frontend_scores = {
@@ -226,8 +230,8 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
 
         output = {"scores": frontend_scores, "cases": cases_list}
         await db.execute(
-            "UPDATE phase_results SET status='completed', output_data=?, completed_at=? WHERE run_id=? AND phase=4",
-            (json.dumps(output), datetime.utcnow().isoformat(), run_id)
+            "UPDATE phase_results SET status='completed', output_data=?, log_text=?, completed_at=? WHERE run_id=? AND phase=4",
+            (json.dumps(output), collector.get_text(), datetime.utcnow().isoformat(), run_id)
         )
         await db.commit()
 
@@ -235,7 +239,7 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
         yield done_event("completed")
 
     except Exception as e:
-        yield log_event("error", f"Phase 4 오류: {e}")
+        yield collector.log("error", f"Phase 4 오류: {e}")
         yield done_event("failed")
         db2 = await get_db()
         try:

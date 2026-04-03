@@ -34,6 +34,7 @@ export const Phase2Panel: React.FC = () => {
 
   const runId = selectedRunId;
   const [userGuide, setUserGuide] = useState('');
+  const [reasoning, setReasoning] = useState('high');
   const isRunning = phaseStatus[2] === 'running';
 
   // Load existing data
@@ -98,13 +99,13 @@ export const Phase2Panel: React.FC = () => {
     setPhaseStatus(2, 'running');
     setRunningPhase(runId, 2);
     try {
-      await runPhase(runId, 2);
+      await runPhase(runId, 2, reasoning);
     } catch (e) {
       alert('실행 오류: ' + (e as Error).message);
       setPhaseStatus(2, 'failed');
       setRunningPhase(runId, null);
     }
-  }, [runId, userGuide, clearP2Logs, setP2Candidates, setP2DesignSummary, setPhaseStatus, setRunningPhase]);
+  }, [runId, userGuide, reasoning, clearP2Logs, setP2Candidates, setP2DesignSummary, setPhaseStatus, setRunningPhase]);
 
   const onCancel = useCallback(async () => {
     if (!runId) return;
@@ -173,6 +174,16 @@ export const Phase2Panel: React.FC = () => {
       <LogBox logs={p2Logs} />
 
       <div className="flex items-center gap-3 flex-wrap">
+        <select
+          value={reasoning}
+          onChange={(e) => setReasoning(e.target.value)}
+          disabled={isRunning}
+          className="py-2 px-2.5 border border-warm-border rounded-md text-[13px] bg-warm-card text-warm-text focus:border-ctp-mauve focus:outline-none disabled:opacity-50"
+        >
+          <option value="high">High (정밀)</option>
+          <option value="medium">Medium (균형)</option>
+          <option value="low">Low (빠름)</option>
+        </select>
         <button
           className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"
           onClick={onRun}

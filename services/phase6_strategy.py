@@ -2,9 +2,9 @@ import json
 from datetime import datetime
 from typing import AsyncGenerator
 from database import get_db
-from services.gpt_client import call_gpt
+from services.gpt_client import call_gpt, get_task_gpt_config
 from services.delta import compute_learning_rate, get_run_scores
-from services.sse_helpers import log_event, result_event, done_event
+from services.sse_helpers import log_event, result_event, done_event, LogCollector
 
 PROMPT_PATH = "prompts/phase6_strategy.txt"
 
@@ -120,7 +120,8 @@ def _format_intermediate(io_raw: str | None) -> str:
     return "\n".join(parts) if parts else "(없음)"
 
 
-async def run_phase6(run_id: int) -> AsyncGenerator[str, None]:
+async def run_phase6(run_id: int, reasoning: str = "high") -> AsyncGenerator[str, None]:
+    collector = LogCollector()
     db = await get_db()
     try:
         async with db.execute("SELECT * FROM runs WHERE id=?", (run_id,)) as cursor:
@@ -130,6 +131,9 @@ async def run_phase6(run_id: int) -> AsyncGenerator[str, None]:
         async with db.execute("SELECT * FROM tasks WHERE id=?", (run["task_id"],)) as cursor:
             task = dict(await cursor.fetchone())
         generation_task = task.get("generation_task", "")
+
+        # 실험별 GPT 설정 로드
+        gpt_config = await get_task_gpt_config(run_id)
 
         # 현재 Run에서 사용된 워크플로우 프롬프트 조회
         current_prompt_text = "(프롬프트 정보 없음)"
@@ -181,7 +185,7 @@ async def run_phase6(run_id: int) -> AsyncGenerator[str, None]:
                         f"[이전 Run #{prev_run_row['run_number']} — score: {prev_score}%]\n"
                         + _format_candidate_prompt(prev_cand_dict)
                     )
-                    yield log_event("info", f"이전 Run #{prev_run_row['run_number']} 프롬프트 로드됨 (score: {prev_score}%)")
+                    yield collector.log("info", f"이전 Run #{prev_run_row['run_number']} 프롬프트 로드됨 (score: {prev_score}%)")
 
         # 이전↔현재 프롬프트 구조적 diff
         prompt_diff = _build_prompt_diff(prev_cand_dict, curr_cand_dict)
@@ -213,7 +217,7 @@ async def run_phase6(run_id: int) -> AsyncGenerator[str, None]:
         current_score = run.get("score_total", 0) or 0
         learning_rate = await compute_learning_rate(run["task_id"], run_id)
 
-        yield log_event("info", f"현재 점수: {round(current_score * 100, 1)}%, Learning rate: {learning_rate}")
+        yield collector.log("info", f"현재 점수: {round(current_score * 100, 1)}%, Learning rate: {learning_rate}")
 
         # 전체 실험 이력
         history_runs = await get_run_scores(run["task_id"], run_id)
@@ -304,12 +308,12 @@ async def run_phase6(run_id: int) -> AsyncGenerator[str, None]:
                             lines.append(f"  {var_name}: {str(info)[:300]}")
                     io_parts.append("\n".join(lines))
                 intermediate_output_analysis = "\n\n".join(io_parts)
-                yield log_event("info", f"중간 출력 샘플 {len(io_rows)}건 수집됨")
+                yield collector.log("info", f"중간 출력 샘플 {len(io_rows)}건 수집됨")
         except Exception:
             pass  # 마이그레이션 전 DB 호환
 
-        yield log_event("info", f"Delta 분석: {delta_summary}")
-        yield log_event("info", "gpt-oss-120B에게 전략 수립 요청 중...")
+        yield collector.log("info", f"Delta 분석: {delta_summary}")
+        yield collector.log("info", "gpt-oss-120B에게 전략 수립 요청 중...")
 
         prompt_template = load_prompt()
         prompt = prompt_template.format(
@@ -328,15 +332,15 @@ async def run_phase6(run_id: int) -> AsyncGenerator[str, None]:
 
         try:
             messages = [{"role": "user", "content": prompt}]
-            raw = await call_gpt(messages, reasoning="high")
+            raw = await call_gpt(messages, reasoning=reasoning, **(gpt_config or {}))
             result = _extract_json(raw)
         except Exception as e:
-            yield log_event("error", f"GPT 호출 실패: {e}")
+            yield collector.log("error", f"GPT 호출 실패: {e}")
             yield done_event("failed")
             await _mark_phase_failed(run_id, 6)
             return
 
-        yield log_event("ok", f"전략 수립 완료: {result.get('strategy_type', 'unknown')}")
+        yield collector.log("ok", f"전략 수립 완료: {result.get('strategy_type', 'unknown')}")
 
         # BUG-6: 프론트 기대 필드명으로 매핑
         frontend_result = {
@@ -349,8 +353,8 @@ async def run_phase6(run_id: int) -> AsyncGenerator[str, None]:
         }
 
         await db.execute(
-            "UPDATE phase_results SET status='completed', output_data=?, completed_at=? WHERE run_id=? AND phase=6",
-            (json.dumps(frontend_result, ensure_ascii=False), datetime.utcnow().isoformat(), run_id)
+            "UPDATE phase_results SET status='completed', output_data=?, log_text=?, completed_at=? WHERE run_id=? AND phase=6",
+            (json.dumps(frontend_result, ensure_ascii=False), collector.get_text(), datetime.utcnow().isoformat(), run_id)
         )
         await db.execute(
             "UPDATE runs SET status='completed', completed_at=? WHERE id=?",
@@ -362,7 +366,7 @@ async def run_phase6(run_id: int) -> AsyncGenerator[str, None]:
         yield done_event("completed")
 
     except Exception as e:
-        yield log_event("error", f"Phase 6 오류: {e}")
+        yield collector.log("error", f"Phase 6 오류: {e}")
         yield done_event("failed")
         await _mark_phase_failed(run_id, 6)
     finally:

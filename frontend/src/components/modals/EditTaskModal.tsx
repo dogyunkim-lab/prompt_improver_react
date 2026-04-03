@@ -34,9 +34,9 @@ export const EditTaskModal: React.FC = () => {
         name: name.trim(),
         description: desc.trim() || undefined,
         generation_task: genType.trim() || undefined,
-        gpt_api_base: gptBase.trim() || undefined,
-        gpt_api_key: gptKey.trim() || undefined,
-        gpt_model: gptModel.trim() || undefined,
+        gpt_api_base: gptBase.trim(),
+        gpt_api_key: gptKey.trim(),
+        gpt_model: gptModel.trim(),
       });
       closeModal();
     } catch (e) {

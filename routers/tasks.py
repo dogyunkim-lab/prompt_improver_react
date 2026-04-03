@@ -11,6 +11,9 @@ class TaskCreate(BaseModel):
     name: str
     description: Optional[str] = None
     generation_task: Optional[str] = None
+    gpt_api_base: Optional[str] = None
+    gpt_api_key: Optional[str] = None
+    gpt_model: Optional[str] = None
 
 
 @router.get("")
@@ -35,8 +38,8 @@ async def create_task(body: TaskCreate):
     db = await get_db()
     try:
         async with db.execute(
-            "INSERT INTO tasks (name, description, generation_task) VALUES (?,?,?)",
-            (body.name, body.description, body.generation_task)
+            "INSERT INTO tasks (name, description, generation_task, gpt_api_base, gpt_api_key, gpt_model) VALUES (?,?,?,?,?,?)",
+            (body.name, body.description, body.generation_task, body.gpt_api_base, body.gpt_api_key, body.gpt_model)
         ) as cursor:
             task_id = cursor.lastrowid
         await db.commit()
@@ -69,6 +72,9 @@ class TaskUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     generation_task: Optional[str] = None
+    gpt_api_base: Optional[str] = None
+    gpt_api_key: Optional[str] = None
+    gpt_model: Optional[str] = None
 
 
 @router.patch("/{task_id}")
@@ -90,6 +96,15 @@ async def update_task(task_id: int, body: TaskUpdate):
         if body.generation_task is not None:
             updates.append("generation_task=?")
             values.append(body.generation_task)
+        if body.gpt_api_base is not None:
+            updates.append("gpt_api_base=?")
+            values.append(body.gpt_api_base)
+        if body.gpt_api_key is not None:
+            updates.append("gpt_api_key=?")
+            values.append(body.gpt_api_key)
+        if body.gpt_model is not None:
+            updates.append("gpt_model=?")
+            values.append(body.gpt_model)
 
         if updates:
             values.append(task_id)

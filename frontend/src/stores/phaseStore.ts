@@ -157,7 +157,11 @@ export const usePhaseStore = create<PhaseStore>((set) => ({
   // P1
   setP1Cases: (c) => set({ p1Cases: c }),
   addP1Case: (c) => set((s) => ({ p1Cases: [...s.p1Cases, c] })),
-  addP1Cases: (c) => set((s) => ({ p1Cases: [...s.p1Cases, ...c] })),
+  addP1Cases: (c) => set((s) => {
+    const existingIds = new Set(s.p1Cases.map((x) => x.id));
+    const deduped = c.filter((x) => !existingIds.has(x.id));
+    return { p1Cases: [...s.p1Cases, ...deduped] };
+  }),
   setP1Sort: (s) => set({ p1Sort: s }),
   setP1Filter: (f) => set({ p1Filter: f }),
   setP1Logs: (l) => set({ p1Logs: l }),

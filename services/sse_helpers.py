@@ -30,3 +30,19 @@ def done_event(status: str) -> str:
 
 def case_event(data: dict) -> str:
     return sse_event({"type": "case", "data": data})
+
+
+class LogCollector:
+    """SSE 로그를 수집하여 나중에 DB에 저장할 수 있도록 한다."""
+
+    def __init__(self):
+        self.logs: list[str] = []
+
+    def log(self, level: str, message: str) -> str:
+        """log_event()와 동일한 SSE 문자열을 반환하면서 내부에 텍스트 저장."""
+        event = log_event(level, message)
+        self.logs.append(f"[{ts()}] [{level}] {message}")
+        return event
+
+    def get_text(self) -> str:
+        return "\n".join(self.logs)

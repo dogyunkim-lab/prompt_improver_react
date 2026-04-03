@@ -90,6 +90,7 @@ export const Phase1Panel: React.FC = () => {
   const [judgeFileName, setJudgeFileName] = useState<string | null>(null);
   const [promptFileName, setPromptFileName] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [reasoning, setReasoning] = useState('high');
 
   const isRunning = phaseStatus[1] === 'running';
 
@@ -198,13 +199,13 @@ export const Phase1Panel: React.FC = () => {
     setPhaseStatus(1, 'running');
     setRunningPhase(runId, 1);
     try {
-      await runPhase(runId, 1);
+      await runPhase(runId, 1, reasoning);
     } catch (e) {
       alert('실행 오류: ' + (e as Error).message);
       setPhaseStatus(1, 'failed');
       setRunningPhase(runId, null);
     }
-  }, [runId, clearP1Logs, setP1Cases, setP1Progress, setP1Scores, setP1Charts, setPhaseStatus, setRunningPhase]);
+  }, [runId, reasoning, clearP1Logs, setP1Cases, setP1Progress, setP1Scores, setP1Charts, setPhaseStatus, setRunningPhase]);
 
   const onCancel = useCallback(async () => {
     if (!runId) return;
@@ -324,6 +325,16 @@ export const Phase1Panel: React.FC = () => {
 
       {/* Action bar */}
       <div className="flex items-center gap-3 flex-wrap">
+        <select
+          value={reasoning}
+          onChange={(e) => setReasoning(e.target.value)}
+          disabled={isRunning}
+          className="py-2 px-2.5 border border-warm-border rounded-md text-[13px] bg-warm-card text-warm-text focus:border-ctp-mauve focus:outline-none disabled:opacity-50"
+        >
+          <option value="high">High (정밀)</option>
+          <option value="medium">Medium (균형)</option>
+          <option value="low">Low (빠름)</option>
+        </select>
         <button
           className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"
           onClick={onRun}

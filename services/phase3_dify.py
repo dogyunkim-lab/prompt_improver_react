@@ -7,7 +7,7 @@ import httpx
 from config import DIFY_BASE_URL
 from database import get_db
 from services.dify_auth import get_dify_token
-from services.sse_helpers import log_event, progress_event, result_event, done_event
+from services.sse_helpers import log_event, progress_event, result_event, done_event, LogCollector
 
 DIFY_CONCURRENCY = 5
 
@@ -52,6 +52,7 @@ async def call_dify_workflow(object_id: str, stt: str) -> dict:
 
 
 async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
+    collector = LogCollector()
     db = await get_db()
     try:
         async with db.execute(
@@ -61,7 +62,7 @@ async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
             connections = [dict(row) for row in await cursor.fetchall()]
 
         if not connections:
-            yield log_event("error", "검증된 Dify 연결이 없습니다.")
+            yield collector.log("error", "검증된 Dify 연결이 없습니다.")
             yield done_event("failed")
             return
 
@@ -72,7 +73,7 @@ async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
             cases = [dict(row) for row in await cursor.fetchall()]
 
         if not cases:
-            yield log_event("error", "케이스 데이터가 없습니다. Phase 1을 먼저 실행하세요.")
+            yield collector.log("error", "케이스 데이터가 없습니다. Phase 1을 먼저 실행하세요.")
             yield done_event("failed")
             return
 
@@ -87,7 +88,7 @@ async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
         await db.commit()
 
         total = len(cases)
-        yield log_event("info", f"총 {total}개 케이스 실행 시작")
+        yield collector.log("info", f"총 {total}개 케이스 실행 시작")
 
         # 선택된 후보의 output_var → node 매핑 조회
         output_var_to_node = {}
@@ -113,7 +114,7 @@ async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
                     if ov and has_node:
                         output_var_to_node[ov] = label.upper()
                 if output_var_to_node:
-                    yield log_event("info",
+                    yield collector.log("info",
                         f"노드-변수 매핑: {', '.join(f'Node {v}→{k}' for k, v in output_var_to_node.items())}")
 
         semaphore = asyncio.Semaphore(DIFY_CONCURRENCY)
@@ -170,9 +171,9 @@ async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
                 done_count += 1
                 if result_str.startswith("ok:"):
                     elapsed = result_str.split(":")[1]
-                    yield log_event("ok", f"완료 ({elapsed}s)")
+                    yield collector.log("ok", f"완료 ({elapsed}s)")
                 else:
-                    yield log_event("warn", f"실패: {result_str.split(':', 1)[1]}")
+                    yield collector.log("warn", f"실패: {result_str.split(':', 1)[1]}")
                 yield progress_event(done_count, total)
         finally:
             for t in pending_tasks:
@@ -180,12 +181,12 @@ async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
                     t.cancel()
 
         msg = f"{total}개 케이스 완료 (오류: {errors}건)"
-        yield log_event("ok" if errors == 0 else "warn", msg)
+        yield collector.log("ok" if errors == 0 else "warn", msg)
 
         output = {"total": total, "completed": completed, "errors": errors}
         await db.execute(
-            "UPDATE phase_results SET status='completed', output_data=?, completed_at=? WHERE run_id=? AND phase=3",
-            (json.dumps(output), datetime.utcnow().isoformat(), run_id)
+            "UPDATE phase_results SET status='completed', output_data=?, log_text=?, completed_at=? WHERE run_id=? AND phase=3",
+            (json.dumps(output), collector.get_text(), datetime.utcnow().isoformat(), run_id)
         )
         await db.execute("UPDATE runs SET status='phase3_done' WHERE id=?", (run_id,))
         await db.commit()
@@ -194,7 +195,7 @@ async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
         yield done_event("completed")
 
     except Exception as e:
-        yield log_event("error", f"Phase 3 오류: {e}")
+        yield collector.log("error", f"Phase 3 오류: {e}")
         yield done_event("failed")
         db2 = await get_db()
         try:

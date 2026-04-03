@@ -218,7 +218,7 @@ async def get_run(run_id: int):
                     output_data = json.loads(pr["output_data"])
                 except Exception:
                     pass
-            phases[phase_num] = {"status": pr["status"], **output_data}
+            phases[phase_num] = {"status": pr["status"], "log_text": pr.get("log_text") or "", **output_data}
 
         # BUG-7: prompt_candidates flat columns → node_prompts 배열 변환
         async with db.execute(

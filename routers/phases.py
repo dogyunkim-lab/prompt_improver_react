@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["phases"])
 
+
+class PhaseRunBody(BaseModel):
+    reasoning: str = "high"
+
 # 각 run_id별 스트림 큐 저장
 _stream_queues: dict[int, dict[int, asyncio.Queue]] = {}
 # 실행 중인 백그라운드 태스크 (run_id, phase) → Task
@@ -75,33 +79,44 @@ async def _run_and_queue(generator, run_id: int, phase: int):
 
 
 def _create_phase_task(generator, run_id: int, phase: int) -> asyncio.Task:
+    # 재실행 시 fresh queue 생성 (stale 이벤트/None 센티널 방지)
+    if run_id not in _stream_queues:
+        _stream_queues[run_id] = {}
+    _stream_queues[run_id][phase] = asyncio.Queue()
+
     task = asyncio.create_task(_run_and_queue(generator, run_id, phase))
     _running_tasks[(run_id, phase)] = task
 
 
 def _make_stream_response(run_id: int, phase: int):
-    """SSE 스트림 응답 생성 — 버퍼 리플레이 후 큐 읽기."""
+    """SSE 스트림 응답 생성 — 버퍼 리플레이 후 큐 읽기 (중복 방지)."""
     q = get_queue(run_id, phase)
     key = (run_id, phase)
 
     async def generator():
-        # 1) 큐에 남아있는 이전 이벤트 드레인 (중복 방지)
-        while not q.empty():
+        # 1) 버퍼 스냅샷 — 현재까지 축적된 이벤트
+        buf = list(_event_buffers.get(key, []))
+        buf_len = len(buf)
+
+        # 2) 큐에서 버퍼에 해당하는 만큼 drain (중복 방지)
+        drained = 0
+        while drained < buf_len and not q.empty():
             try:
-                stale = q.get_nowait()
-                if stale is None:
+                item = q.get_nowait()
+                drained += 1
+                if item is None:
                     # 이미 완료된 Phase — 버퍼만 보내고 종료
-                    buf = list(_event_buffers.get(key, []))
                     for event in buf:
                         yield event
                     return
             except asyncio.QueueEmpty:
                 break
-        # 2) 이전 이벤트 리플레이 (새로고침 복원)
-        buf = list(_event_buffers.get(key, []))
+
+        # 3) 버퍼 리플레이 (페이지 새로고침 시 이전 이벤트 복원)
         for event in buf:
             yield event
-        # 3) 새 이벤트 수신
+
+        # 4) 새 이벤트 수신 (버퍼에 없는 것만)
         while True:
             item = await q.get()
             if item is None:
@@ -110,7 +125,6 @@ def _make_stream_response(run_id: int, phase: int):
 
     return StreamingResponse(generator(), media_type="text/event-stream",
                               headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-    return task
 
 
 # ── 중단 엔드포인트 ────────────────────────────────────────────────────────────
@@ -128,7 +142,7 @@ async def cancel_phase(run_id: int, phase: int):
 # ── Phase 1 ──────────────────────────────────────────────────────────────────
 
 @router.post("/api/runs/{run_id}/phase/1/run")
-async def trigger_phase1(run_id: int):
+async def trigger_phase1(run_id: int, body: PhaseRunBody = PhaseRunBody()):
     db = await get_db()
     try:
         async with db.execute("SELECT id FROM runs WHERE id=?", (run_id,)) as cursor:
@@ -137,7 +151,7 @@ async def trigger_phase1(run_id: int):
     finally:
         await db.close()
     get_queue(run_id, 1)
-    _create_phase_task(run_phase1(run_id), run_id, 1)
+    _create_phase_task(run_phase1(run_id, reasoning=body.reasoning), run_id, 1)
     return {"ok": True}
 
 
@@ -149,7 +163,7 @@ async def stream_phase1(run_id: int):
 # ── Phase 2 ──────────────────────────────────────────────────────────────────
 
 @router.post("/api/runs/{run_id}/phase/2/run")
-async def trigger_phase2(run_id: int):
+async def trigger_phase2(run_id: int, body: PhaseRunBody = PhaseRunBody()):
     db = await get_db()
     try:
         async with db.execute(
@@ -161,7 +175,7 @@ async def trigger_phase2(run_id: int):
             raise HTTPException(status_code=400, detail="Phase 1이 완료되지 않았습니다.")
     finally:
         await db.close()
-    _create_phase_task(run_phase2(run_id), run_id, 2)
+    _create_phase_task(run_phase2(run_id, reasoning=body.reasoning), run_id, 2)
     return {"ok": True}
 
 
@@ -435,7 +449,7 @@ async def get_phase5(run_id: int):
 # ── Phase 6 ──────────────────────────────────────────────────────────────────
 
 @router.post("/api/runs/{run_id}/phase/6/run")
-async def trigger_phase6(run_id: int):
+async def trigger_phase6(run_id: int, body: PhaseRunBody = PhaseRunBody()):
     db = await get_db()
     try:
         async with db.execute(
@@ -447,7 +461,7 @@ async def trigger_phase6(run_id: int):
             raise HTTPException(status_code=400, detail="Phase 4가 완료되지 않았습니다.")
     finally:
         await db.close()
-    _create_phase_task(run_phase6(run_id), run_id, 6)
+    _create_phase_task(run_phase6(run_id, reasoning=body.reasoning), run_id, 6)
     return {"ok": True}
 
 

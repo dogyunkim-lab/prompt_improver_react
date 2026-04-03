@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { usePhaseStore } from '../../stores/phaseStore';
 import { useRunStore } from '../../stores/runStore';
 import { useUIStore } from '../../stores/uiStore';
@@ -15,6 +15,7 @@ export const Phase6Panel: React.FC = () => {
   const runData = runStore.runData;
 
   const isRunning = ps.phaseStatus[6] === 'running';
+  const [reasoning, setReasoning] = useState('high');
   const data = ps.p6Data;
 
   // Load existing data
@@ -62,13 +63,13 @@ export const Phase6Panel: React.FC = () => {
     ps.setPhaseStatus(6, 'running');
     runStore.setRunningPhase(runId, 6);
     try {
-      await runPhase(runId, 6);
+      await runPhase(runId, 6, reasoning);
     } catch (e) {
       alert('실행 오류: ' + (e as Error).message);
       ps.setPhaseStatus(6, 'failed');
       runStore.setRunningPhase(runId, null);
     }
-  }, [runId, ps, runStore]);
+  }, [runId, reasoning, ps, runStore]);
 
   const onCancel = useCallback(async () => {
     if (!runId) return;
@@ -138,6 +139,16 @@ export const Phase6Panel: React.FC = () => {
       <LogBox logs={ps.p6Logs} />
 
       <div className="flex items-center gap-3 flex-wrap">
+        <select
+          value={reasoning}
+          onChange={(e) => setReasoning(e.target.value)}
+          disabled={isRunning}
+          className="py-2 px-2.5 border border-warm-border rounded-md text-[13px] bg-warm-card text-warm-text focus:border-ctp-mauve focus:outline-none disabled:opacity-50"
+        >
+          <option value="high">High (정밀)</option>
+          <option value="medium">Medium (균형)</option>
+          <option value="low">Low (빠름)</option>
+        </select>
         <button
           className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"
           onClick={onRun}
