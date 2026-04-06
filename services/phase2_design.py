@@ -5,7 +5,8 @@ from datetime import datetime
 from typing import AsyncGenerator
 from database import get_db
 from services.gpt_client import call_gpt, get_task_gpt_config
-from services.delta import compute_learning_rate, count_completed_runs, get_run_scores
+from services.delta import compute_learning_rate, count_completed_runs
+from services.experiment_history import build_experiment_history
 from services.sse_helpers import log_event, result_event, done_event, LogCollector
 
 logger = logging.getLogger(__name__)
@@ -646,14 +647,9 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
         design_mode = "explore" if prev_completed == 0 else "converge"
         learning_rate = await compute_learning_rate(run["task_id"], run_id)
 
-        history_runs = await get_run_scores(run["task_id"], run_id)
-        if history_runs:
-            experiment_history = "\n".join(
-                f"Run {hr['run_number']}: score_total={hr['score_total']}%"
-                for hr in history_runs
-            )
-        else:
-            experiment_history = "첫 번째 실험"
+        # 전체 실험 이력 (누적 피드백 포함)
+        history = await build_experiment_history(run["task_id"], run_id, max_token_budget=1500)
+        experiment_history = history["full_text"] or "첫 번째 실험"
 
         improvable_cases = phase1_summary.get("prompt_improvable_cases", [])
         improvable_count = len(improvable_cases)
@@ -681,6 +677,14 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                     yield collector.log("info", f"이전 Run #{run['base_run_id']}의 Phase 6 없음 → Run #{feedback_source_run} 피드백으로 대체")
             else:
                 yield collector.log("warn", f"이전 Run #{run['base_run_id']} 및 Task 내 Phase 6 피드백을 찾을 수 없습니다")
+
+        # 누적 실험 피드백을 prev_run_feedback에 append
+        if history.get("effective_patterns"):
+            prev_run_feedback += f"\n\n[전체 실험 누적 양성 피드백]\n{history['effective_patterns']}"
+        if history.get("regression_patterns"):
+            prev_run_feedback += f"\n\n[전체 실험 누적 음성 피드백]\n{history['regression_patterns']}"
+        if history.get("accumulated_constraints"):
+            prev_run_feedback += f"\n\n[누적 제약 — 반드시 유지]\n{history['accumulated_constraints']}"
 
         # 사용자 전략 가이드
         user_guide = run.get("user_guide") or ""

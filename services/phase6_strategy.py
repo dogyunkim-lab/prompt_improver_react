@@ -3,7 +3,8 @@ from datetime import datetime
 from typing import AsyncGenerator
 from database import get_db
 from services.gpt_client import call_gpt, get_task_gpt_config
-from services.delta import compute_learning_rate, get_run_scores
+from services.delta import compute_learning_rate
+from services.experiment_history import build_experiment_history
 from services.sse_helpers import log_event, result_event, done_event, LogCollector
 
 PROMPT_PATH = "prompts/phase6_strategy.txt"
@@ -219,14 +220,9 @@ async def run_phase6(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
 
         yield collector.log("info", f"현재 점수: {round(current_score * 100, 1)}%, Learning rate: {learning_rate}")
 
-        # 전체 실험 이력
-        history_runs = await get_run_scores(run["task_id"], run_id)
-        history_lines = []
-        for hr in history_runs:
-            history_lines.append(
-                f"Run {hr['run_number']} (id={hr['id']}): score_total={hr['score_total']}%"
-            )
-        experiment_history = "\n".join(history_lines) if history_lines else "이전 실험 없음"
+        # 전체 실험 이력 (누적 피드백 포함)
+        history = await build_experiment_history(run["task_id"], run_id, max_token_budget=1200)
+        experiment_history = history["full_text"] or "이전 실험 없음"
 
         # Delta 분석
         async with db.execute(
