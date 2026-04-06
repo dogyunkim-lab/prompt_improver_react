@@ -22,8 +22,12 @@ export const Phase6Panel: React.FC = () => {
   useEffect(() => {
     if (!runData?.phases?.[6]) return;
     const p6 = runData.phases[6];
-    const od = p6.output_data as Phase6Data | undefined;
-    if (od) ps.setP6Data(od);
+    // output_data는 spread되어 최상위에 존재 (p6.output_data가 아닌 p6 자체)
+    const { status: _s, log_text: _l, cases: _c, ...od } = p6 as any;
+    if (od && (od.backprop || od.effective || od.next_direction)) {
+      ps.setP6Data(od as Phase6Data);
+      if (od.learning_rate) ps.setP6LearningRate(od.learning_rate);
+    }
     // log_text 복원
     if (p6.log_text && ps.p6Logs.length === 0) {
       const restored = (p6.log_text as string).split('\n').filter(Boolean).map((line: string) => ({

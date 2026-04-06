@@ -401,7 +401,7 @@ async def get_phase5(run_id: int):
             except Exception:
                 pass
             cases_with_delta.append({
-                "id": c["case_id"], "judge": c["evaluation"] or "",
+                "id": c["case_id"], "evaluation": c["evaluation"] or "",
                 "reason": c["reason"] or "", "stt": c["stt"] or "",
                 "reference": c["reference"] or "", "generated": c["generated"] or "",
                 "prev_judge": d["prev_evaluation"] if d else None,

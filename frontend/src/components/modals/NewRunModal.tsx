@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Modal } from '../shared/Modal';
 import { useUIStore } from '../../stores/uiStore';
 import { useTaskStore } from '../../stores/taskStore';
@@ -14,6 +14,11 @@ export const NewRunModal: React.FC = () => {
   const { setCurrentPhase, resetPhaseData, updatePhaseTabsFromRunData } = usePhaseStore();
   const [startMode, setStartMode] = useState<'zero' | 'continue'>('zero');
   const [baseRunId, setBaseRunId] = useState<number | null>(null);
+
+  // 모달 열릴 때 최신 runs 데이터 가져오기
+  useEffect(() => {
+    if (activeModal === 'newRun') refreshTasks();
+  }, [activeModal]);
 
   const task = tasks.find((t) => t.id === selectedTaskId);
   const runs = task?.runs || [];
