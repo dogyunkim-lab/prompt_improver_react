@@ -432,6 +432,7 @@ async def _generate_single_candidate(
     prompt = template.format(
         generation_task=task.get("generation_task", "불편사항 요약"),
         candidate_label=label,
+        strategy_name=strategy_candidate.get("strategy_name", ""),
         node_count=node_count,
         node_roles=json.dumps(strategy_candidate.get("node_roles", []), ensure_ascii=False),
         node_reasoning_config=json.dumps(strategy_candidate.get("node_reasoning_config", []), ensure_ascii=False),
@@ -721,7 +722,7 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
         design_summary = strategy_result.get("design_summary", "")
 
         node_desc = ", ".join(
-            f"후보 {c['label']}: {c['node_count']}노드"
+            f"후보 {c['label']}: {c.get('strategy_name', '')} ({c['node_count']}노드)"
             for c in strategy_candidates
         )
         yield collector.log("ok", f"전략 수립 완료 — {node_desc}")
