@@ -294,7 +294,7 @@ async def get_run(run_id: int):
                 if p4_rows:
                     phases[4]["cases"] = [{
                         "id": r["case_id"],
-                        "judge": r["evaluation"] or "",
+                        "evaluation": r["evaluation"] or "",
                         "reason": r["reason"] or "",
                         "stt": r["stt"] or "",
                         "reference": r["reference"] or "",

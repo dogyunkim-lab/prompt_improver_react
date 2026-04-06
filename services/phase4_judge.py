@@ -7,7 +7,7 @@ from services.gpt_client import call_gpt, get_task_gpt_config
 from services.delta import compute_and_save_deltas, aggregate_scores
 from services.sse_helpers import log_event, progress_event, result_event, done_event, LogCollector
 
-SYSTEM_PROMPT_PATH = "prompts/phase4_judge_system.txt"
+SYSTEM_PROMPT_PATH = "prompts/phase4_judge.txt"
 USER_PROMPT_PATH = "prompts/phase4_judge_user.txt"
 JUDGE_CONCURRENCY = 5
 
@@ -73,7 +73,7 @@ def _classify_from_text(raw_text: str) -> tuple:
         return "정답", "동일 정보"
 
     # 폴백: 평가실패 유지 (실제 Judge와 동일)
-    return "평가실패", "평가 불기"
+    return "평가실패", "평가 불가"
 
 
 async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
@@ -222,7 +222,7 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
             result_cases = [dict(row) for row in await cursor.fetchall()]
 
         cases_list = [{
-            "id": r["case_id"], "judge": r["evaluation"] or "",
+            "id": r["case_id"], "evaluation": r["evaluation"] or "",
             "reason": r["reason"] or "", "stt": r["stt"] or "",
             "reference": r["reference"] or "", "generated": r["generated"] or "",
             "intermediate_outputs": json.loads(r["intermediate_outputs"]) if r.get("intermediate_outputs") else {},

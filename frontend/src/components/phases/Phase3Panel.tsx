@@ -102,15 +102,73 @@ export const Phase3Panel: React.FC = () => {
   const selectedCand = runData?.phases?.[2]?.candidates?.find(
     (c) => c.id === (runData.selected_candidate_id || selectedCandidateId),
   );
+  const [openNodes, setOpenNodes] = useState<Record<string, boolean>>({});
+  const toggleNode = (key: string) => setOpenNodes((prev) => ({ ...prev, [key]: !prev[key] }));
 
   return (
     <div>
       <div className="bg-warm-card rounded-[10px] p-4 mb-4 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
         {selectedCand ? (
           <div>
-            <h4 className="text-[13px] text-[#555] mb-2">선택된 후보: <span className="text-ctp-mauve font-bold">{selectedCand.candidate_label}</span></h4>
-            <p className="text-xs text-[#555] leading-normal">{selectedCand.design_rationale}</p>
-            <p className="text-[11px] text-warm-muted mt-1">{selectedCand.node_count}노드 · {selectedCand.mode}</p>
+            <h4 className="text-[13px] text-[#555] mb-2">
+              선택된 후보: <span className="text-ctp-mauve font-bold">후보 {selectedCand.candidate_label}</span>
+              <span className="text-warm-muted font-normal ml-2">({selectedCand.node_count}-Step · {selectedCand.mode})</span>
+            </h4>
+            {selectedCand.design_rationale && (
+              <p className="text-xs text-[#555] leading-normal mb-3">{selectedCand.design_rationale}</p>
+            )}
+            {selectedCand.nodes && selectedCand.nodes.length > 0 && (
+              <div className="flex flex-col gap-2">
+                {selectedCand.nodes.map((node, idx) => {
+                  const key = `${selectedCand.id}-${idx}`;
+                  const isOpen = openNodes[key];
+                  return (
+                    <div key={key} className="border border-warm-border rounded-md overflow-hidden">
+                      <button
+                        type="button"
+                        className="w-full flex items-center gap-2 px-3 py-2 bg-warm-hover text-left text-xs font-semibold text-warm-text hover:bg-[#2a2a2a]"
+                        onClick={() => toggleNode(key)}
+                      >
+                        <span className="text-ctp-mauve">{isOpen ? '▾' : '▸'}</span>
+                        <span>Step {idx + 1} 프롬프트 (노드 {node.label})</span>
+                        {node.reasoning && (
+                          <span className="ml-1 px-1.5 py-0.5 text-[10px] bg-ctp-mauve/20 text-ctp-mauve rounded">추론</span>
+                        )}
+                        {node.output_var && (
+                          <span className="ml-auto text-[10px] text-warm-muted font-normal">→ {node.output_var}</span>
+                        )}
+                      </button>
+                      {isOpen && (
+                        <div className="p-3 bg-[#1a1a1a] text-[11px] text-[#ccc] space-y-2">
+                          {node.input_vars && node.input_vars.length > 0 && (
+                            <div>
+                              <div className="text-warm-muted mb-1">입력 변수:</div>
+                              <div className="flex flex-wrap gap-1">
+                                {node.input_vars.map((v) => (
+                                  <span key={v} className="px-1.5 py-0.5 bg-warm-hover rounded text-[10px]">{v}</span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {node.system_prompt && (
+                            <div>
+                              <div className="text-warm-muted mb-1">System Prompt:</div>
+                              <pre className="whitespace-pre-wrap font-mono leading-relaxed">{node.system_prompt}</pre>
+                            </div>
+                          )}
+                          {node.user_prompt && (
+                            <div>
+                              <div className="text-warm-muted mb-1">User Prompt:</div>
+                              <pre className="whitespace-pre-wrap font-mono leading-relaxed">{node.user_prompt}</pre>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         ) : (
           <div className="text-warm-muted text-sm">Phase 2에서 후보를 선택하세요.</div>
