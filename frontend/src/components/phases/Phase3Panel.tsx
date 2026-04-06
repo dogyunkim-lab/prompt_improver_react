@@ -153,13 +153,13 @@ export const Phase3Panel: React.FC = () => {
                           {node.system_prompt && (
                             <div>
                               <div className="text-warm-muted mb-1">System Prompt:</div>
-                              <pre className="whitespace-pre-wrap font-mono leading-relaxed">{node.system_prompt}</pre>
+                              <pre className="whitespace-pre-wrap font-mono leading-relaxed">{node.system_prompt?.replace(/\\n/g, '\n')}</pre>
                             </div>
                           )}
                           {node.user_prompt && (
                             <div>
                               <div className="text-warm-muted mb-1">User Prompt:</div>
-                              <pre className="whitespace-pre-wrap font-mono leading-relaxed">{node.user_prompt}</pre>
+                              <pre className="whitespace-pre-wrap font-mono leading-relaxed">{node.user_prompt?.replace(/\\n/g, '\n')}</pre>
                             </div>
                           )}
                         </div>

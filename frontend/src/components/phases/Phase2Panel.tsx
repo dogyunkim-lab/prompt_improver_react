@@ -254,7 +254,7 @@ const CandidateCard: React.FC<{
             >User</button>
           </div>
           <div className="text-xs text-[#555] leading-relaxed whitespace-pre-wrap bg-[#fafafa] p-2 rounded max-h-[300px] overflow-y-auto">
-            {promptTab === 'system' ? currentNode.system_prompt : currentNode.user_prompt}
+            {(promptTab === 'system' ? currentNode.system_prompt : currentNode.user_prompt)?.replace(/\\n/g, '\n')}
           </div>
           <div className="text-[11px] text-warm-muted mt-1">
             <span className="font-semibold text-[#666]">입력: </span>
