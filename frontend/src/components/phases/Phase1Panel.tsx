@@ -123,8 +123,7 @@ export const Phase1Panel: React.FC = () => {
     const p1 = runData.phases[1];
     if (p1.cases?.length) setP1Cases(p1.cases);
     if (p1.eval_chart) setP1Charts(p1.eval_chart, p1.bucket_chart || null);
-    const od = p1.output_data as Record<string, unknown> | undefined;
-    if (od?.scores) setP1Scores(od.scores as typeof p1Scores);
+    if (p1.scores) setP1Scores(p1.scores as typeof p1Scores);
     // continue mode banner
     if (runData.start_mode === 'continue' && runData.judge_original_name) {
       setJudgeFileName(runData.judge_original_name);

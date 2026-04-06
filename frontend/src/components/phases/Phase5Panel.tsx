@@ -50,7 +50,8 @@ const DETAIL_FIELDS = [
   { key: 'reason', label: '사유' },
   { key: 'stt', label: 'STT' },
   { key: 'reference', label: 'Reference' },
-  { key: 'generated', label: 'Generated' },
+  { key: 'prev_generated', label: '이전 Generated' },
+  { key: 'generated', label: 'Generated (현재)' },
   { key: 'intermediate_outputs', label: '중간 출력' },
 ];
 

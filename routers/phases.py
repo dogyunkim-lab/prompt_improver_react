@@ -384,10 +384,21 @@ async def get_phase5(run_id: int):
 
         # 케이스별 delta 조회 (이전 판정 → 현재 판정)
         async with db.execute(
-            "SELECT case_id, prev_evaluation, curr_evaluation, delta_type FROM case_deltas WHERE to_run_id=?",
+            "SELECT case_id, from_run_id, prev_evaluation, curr_evaluation, delta_type FROM case_deltas WHERE to_run_id=?",
             (run_id,)
         ) as cursor:
             delta_map = {r["case_id"]: dict(r) for r in await cursor.fetchall()}
+
+        # 이전 Run의 generated 조회 (delta 비교용)
+        prev_generated_map = {}
+        prev_run_ids = set(d["from_run_id"] for d in delta_map.values() if d.get("from_run_id"))
+        for prev_rid in prev_run_ids:
+            async with db.execute(
+                "SELECT case_id, generated FROM case_results WHERE run_id=?",
+                (prev_rid,)
+            ) as cursor:
+                for row in await cursor.fetchall():
+                    prev_generated_map[row["case_id"]] = row["generated"] or ""
 
         goal_achieved = scores["score_total"] >= 95.0
 
@@ -405,6 +416,7 @@ async def get_phase5(run_id: int):
                 "reason": c["reason"] or "", "stt": c["stt"] or "",
                 "reference": c["reference"] or "", "generated": c["generated"] or "",
                 "prev_judge": d["prev_evaluation"] if d else None,
+                "prev_generated": prev_generated_map.get(c["case_id"]) or "",
                 "delta_type": d["delta_type"] if d else None,
                 "intermediate_outputs": io,
             })
