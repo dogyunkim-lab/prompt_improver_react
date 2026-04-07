@@ -236,7 +236,7 @@ export const Phase1Panel: React.FC = () => {
           <button
             className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"
             onClick={onUploadJudge}
-            disabled={!judgeFile || uploading}
+            disabled={!runId || !judgeFile || uploading}
           >업로드</button>
           {judgeFileName && <span className="text-xs text-warm-muted">✓ {judgeFileName}</span>}
         </div>
@@ -255,7 +255,7 @@ export const Phase1Panel: React.FC = () => {
           <button
             className="py-2 px-4 bg-transparent text-ctp-mauve rounded-md font-semibold text-[13px] border border-ctp-mauve hover:bg-ctp-mauve/10 disabled:opacity-50"
             onClick={onUploadPrompt}
-            disabled={!promptFile || uploading}
+            disabled={!runId || !promptFile || uploading}
           >���롬프트 업로드</button>
           {promptFileName && <span className="text-xs text-warm-muted">✓ {promptFileName}</span>}
         </div>
