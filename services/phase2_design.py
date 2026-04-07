@@ -436,6 +436,7 @@ async def _generate_single_candidate(
     user_guide: str = "",
     reference_style_profile: str = "",
     anchor_guide: str = "",
+    retry_feedback: str = "",
     gpt_config: dict | None = None,
     reasoning: str = "high",
 ) -> dict | None:
@@ -476,6 +477,10 @@ async def _generate_single_candidate(
         reference_criteria=reference_criteria_section,
         anchor_guide=anchor_guide_section,
     )
+
+    # 재시도 시 1차 실패 피드백 주입
+    if retry_feedback:
+        prompt += f"\n\n[Mini-validation 1차 실패 피드백 — 반드시 반영]\n{retry_feedback}\n위 실패를 반복하지 않도록 프롬프트를 근본적으로 개선하라. JSON만 출력하라."
 
     for attempt in range(max_retries + 1):
         try:
@@ -627,6 +632,29 @@ async def _select_validation_cases(
         return result
     finally:
         await db.close()
+
+
+def _build_retry_feedback(candidates: list) -> str:
+    """Mini-validation 전체 실패 시, 재시도에 주입할 피드백 텍스트 생성."""
+    lines = [
+        "아래는 1차 시도에서 각 후보가 생성한 결과와 Judge 판정이다. 모든 후보가 실패했다.",
+        "이 실패 원인을 분석하고, 동일 오류가 반복되지 않도록 프롬프트를 근본적으로 개선하라.",
+        "",
+    ]
+    for cand in candidates:
+        label = cand.get("label", "")
+        mv = cand.get("mini_validation", {})
+        details = mv.get("details", [])
+        lines.append(f"후보 {label}:")
+        for d in details:
+            case_id = d.get("case_id", "")
+            eval_result = d.get("evaluation", "평가실패")
+            preview = (d.get("generated_preview") or "")[:200]
+            lines.append(f"  - 케이스 {case_id}: 판정={eval_result}")
+            if preview:
+                lines.append(f"    생성 결과: \"{preview}\"")
+        lines.append("")
+    return "\n".join(lines)
 
 
 async def _simulate_workflow_for_case(
@@ -1097,9 +1125,84 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                     yield collector.log("warn", f"Mini-validation 필터링: {filtered_count}개 후보 제거 (pass_rate=0)")
                 final_candidates = passing
             else:
-                # 모두 0이면 최선 1개 유지 + 경고
-                yield collector.log("warn", "모든 후보 pass_rate=0 — 최선 1개만 유지합니다 (GPT 설계 결과를 참고용으로 제공)")
-                final_candidates = final_candidates[:1]
+                # ── 전체 실패 → 피드백 반영 1회 재시도 ──
+                yield collector.log("warn", "모든 후보 pass_rate=0 — 실패 피드백 반영 재시도 (1회)")
+
+                retry_feedback_text = _build_retry_feedback(final_candidates)
+
+                # Step 2 재실행: 전략은 유지, 프롬프트만 재생성
+                retry_gen_tasks = [
+                    _generate_single_candidate(
+                        sc, design_summary, task, improvable_cases,
+                        user_guide=user_guide,
+                        reference_style_profile=reference_style_profile,
+                        anchor_guide=anchor_guide,
+                        retry_feedback=retry_feedback_text,
+                        gpt_config=gpt_config,
+                        reasoning=reasoning,
+                    )
+                    for sc in strategy_candidates
+                ]
+                retry_results = await asyncio.gather(*retry_gen_tasks, return_exceptions=True)
+
+                retry_candidates = []
+                for sc, gen_result in zip(strategy_candidates, retry_results):
+                    if isinstance(gen_result, Exception):
+                        yield collector.log("warn", f"재시도 후보 {sc['label']} 생성 실패: {gen_result}")
+                    elif gen_result is None:
+                        yield collector.log("warn", f"재시도 후보 {sc['label']} 생성 실패 — 스킵")
+                    else:
+                        node_count = len(gen_result.get("nodes", []))
+                        yield collector.log("ok", f"재시도 후보 {sc['label']} 생성 완료 ({node_count} 노드)")
+                        retry_candidates.append(gen_result)
+
+                # Step 3 재실행: 검증 및 보정
+                validated_retry = []
+                for cand in retry_candidates:
+                    missing = _validate_candidate(cand)
+                    if not missing:
+                        validated_retry.append(cand)
+                    else:
+                        repaired = await _repair_candidate(cand, missing, task, gpt_config=gpt_config, reasoning=reasoning)
+                        still_missing = _validate_candidate(repaired)
+                        if not still_missing:
+                            validated_retry.append(repaired)
+                        else:
+                            actual_count = len([
+                                n for n in repaired.get("nodes", [])
+                                if (n.get("system_prompt", "").strip() or n.get("user_prompt", "").strip())
+                            ])
+                            if actual_count > 0:
+                                repaired["node_count"] = actual_count
+                                validated_retry.append(repaired)
+
+                if validated_retry:
+                    # Step 4 재실행: mini-validation
+                    yield collector.log("info", f"재시도 mini-validation ({len(validated_retry)}개 후보)")
+                    validated_retry = await _run_mini_validation(
+                        validated_retry, validation_cases,
+                        gpt_config=gpt_config, sim_config=sim_config,
+                    )
+
+                    for cand in validated_retry:
+                        mv = cand.get("mini_validation", {})
+                        pr = mv.get("pass_rate", 0)
+                        p = mv.get("passed", 0)
+                        t = mv.get("total", 0)
+                        yield collector.log("info", f"재시도 후보 {cand['label']}: pass_rate={int(pr * 100)}% ({p}/{t})")
+
+                    retry_passing = [c for c in validated_retry if c.get("mini_validation", {}).get("pass_rate", 0) > 0]
+
+                    if retry_passing:
+                        final_candidates = retry_passing
+                        yield collector.log("ok", f"재시도 성공 — {len(retry_passing)}개 후보 통과")
+                    else:
+                        # 재시도에서도 전체 실패 → 최선 1개 추천
+                        yield collector.log("warn", "재시도에서도 모든 후보 pass_rate=0 — 재시도 후보 중 최선 1개 추천")
+                        final_candidates = validated_retry[:1]
+                else:
+                    yield collector.log("warn", "재시도 후보 생성/검증 실패 — 1차 시도 최선 1개 유지")
+                    final_candidates = final_candidates[:1]
 
             mini_validation_summary = {
                 "enabled": True,
@@ -1116,7 +1219,7 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                 ],
             }
 
-            yield collector.log("ok", f"Mini-validation 완료 — {len(final_candidates)}개 후보 통과")
+            yield collector.log("ok", f"Mini-validation 완료 — {len(final_candidates)}개 후보 최종 선정")
         else:
             yield collector.log("info", "Step 4/4: Mini-validation 스킵 (개선 가능한 오답 케이스 없음)")
 
