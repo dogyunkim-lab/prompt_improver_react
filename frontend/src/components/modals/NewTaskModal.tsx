@@ -1,7 +1,8 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Modal } from '../shared/Modal';
 import { useUIStore } from '../../stores/uiStore';
 import { useTaskStore } from '../../stores/taskStore';
+import { fetchAnchorList } from '../../api/tasks';
 
 export const NewTaskModal: React.FC = () => {
   const { activeModal, closeModal, submitting, setSubmitting } = useUIStore();
@@ -15,8 +16,17 @@ export const NewTaskModal: React.FC = () => {
   const [simBase, setSimBase] = useState('');
   const [simKey, setSimKey] = useState('');
   const [simModel, setSimModel] = useState('');
+  const [anchorFile, setAnchorFile] = useState('');
+  const [anchorOptions, setAnchorOptions] = useState<{ filename: string; name: string }[]>([]);
   const [showLLM, setShowLLM] = useState(false);
   const [showSimLLM, setShowSimLLM] = useState(false);
+  const [showAnchor, setShowAnchor] = useState(false);
+
+  useEffect(() => {
+    if (activeModal === 'newTask') {
+      fetchAnchorList().then(setAnchorOptions).catch(() => setAnchorOptions([]));
+    }
+  }, [activeModal]);
 
   const onSubmit = useCallback(async () => {
     if (!name.trim()) return;
@@ -32,6 +42,7 @@ export const NewTaskModal: React.FC = () => {
         sim_api_base: simBase.trim() || undefined,
         sim_api_key: simKey.trim() || undefined,
         sim_model: simModel.trim() || undefined,
+        anchor_guide_file: anchorFile || undefined,
       });
       setSelectedTaskId(task.id);
       setName('');
@@ -43,13 +54,14 @@ export const NewTaskModal: React.FC = () => {
       setSimBase('');
       setSimKey('');
       setSimModel('');
+      setAnchorFile('');
       closeModal();
     } catch (e) {
       alert('생성 오류: ' + (e as Error).message);
     } finally {
       setSubmitting(false);
     }
-  }, [name, desc, genType, gptBase, gptKey, gptModel, simBase, simKey, simModel, createTask, setSelectedTaskId, closeModal, setSubmitting]);
+  }, [name, desc, genType, gptBase, gptKey, gptModel, simBase, simKey, simModel, anchorFile, createTask, setSelectedTaskId, closeModal, setSubmitting]);
 
   return (
     <Modal
@@ -174,6 +186,31 @@ export const NewTaskModal: React.FC = () => {
               value={simModel}
               onChange={(e) => setSimModel(e.target.value)}
             />
+          </div>
+        </div>
+      )}
+      <div className="mb-1">
+        <button
+          type="button"
+          className="text-xs text-ctp-peach font-semibold hover:underline"
+          onClick={() => setShowAnchor(!showAnchor)}
+        >{showAnchor ? '▾ 앵커 가이드 접기' : '▸ 앵커 가이드 (Phase 2 전략 고정 가이드)'}</button>
+      </div>
+      {showAnchor && (
+        <div className="pl-2 border-l-2 border-ctp-peach/30 mb-3.5 space-y-2.5">
+          <p className="text-[11px] text-[#888]">Phase 2에서 GPT가 프롬프트를 설계할 때 참조하는 고정 가이드입니다. prompts/anchors/ 폴더에서 선택합니다.</p>
+          <div>
+            <label className="block text-xs text-[#666] mb-1 font-semibold">앵커 가이드 파일</label>
+            <select
+              className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-peach focus:outline-none"
+              value={anchorFile}
+              onChange={(e) => setAnchorFile(e.target.value)}
+            >
+              <option value="">사용 안 함</option>
+              {anchorOptions.map((a) => (
+                <option key={a.filename} value={a.filename}>{a.name}</option>
+              ))}
+            </select>
           </div>
         </div>
       )}

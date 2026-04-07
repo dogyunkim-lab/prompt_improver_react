@@ -10,6 +10,7 @@ export interface Task {
   sim_api_base?: string;
   sim_api_key?: string;
   sim_model?: string;
+  anchor_guide_file?: string;
   created_at?: string;
   runs: Run[];
 }
@@ -52,6 +53,7 @@ export interface PhaseData {
   eval_chart?: ChartData;
   bucket_chart?: ChartData;
   candidates?: Candidate[];
+  scores?: Record<string, number>;
 }
 
 export type PhaseStatus = 'idle' | 'pending' | 'running' | 'completed' | 'done' | 'failed' | 'cancelled';

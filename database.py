@@ -169,6 +169,8 @@ async def init_db():
             "ALTER TABLE tasks ADD COLUMN sim_api_base TEXT",
             "ALTER TABLE tasks ADD COLUMN sim_api_key TEXT",
             "ALTER TABLE tasks ADD COLUMN sim_model TEXT",
+            # 앵커 가이드 파일명 (prompts/anchors/ 내 .txt)
+            "ALTER TABLE tasks ADD COLUMN anchor_guide_file TEXT",
         ]
         for stmt in _migration_stmts:
             try:

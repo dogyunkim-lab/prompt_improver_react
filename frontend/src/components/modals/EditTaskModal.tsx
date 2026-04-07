@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Modal } from '../shared/Modal';
 import { useUIStore } from '../../stores/uiStore';
 import { useTaskStore } from '../../stores/taskStore';
+import { fetchAnchorList } from '../../api/tasks';
 
 export const EditTaskModal: React.FC = () => {
   const { activeModal, editingTask, closeModal, submitting, setSubmitting } = useUIStore();
@@ -15,8 +16,17 @@ export const EditTaskModal: React.FC = () => {
   const [simBase, setSimBase] = useState('');
   const [simKey, setSimKey] = useState('');
   const [simModel, setSimModel] = useState('');
+  const [anchorFile, setAnchorFile] = useState('');
+  const [anchorOptions, setAnchorOptions] = useState<{ filename: string; name: string }[]>([]);
   const [showLLM, setShowLLM] = useState(false);
   const [showSimLLM, setShowSimLLM] = useState(false);
+  const [showAnchor, setShowAnchor] = useState(false);
+
+  useEffect(() => {
+    if (activeModal === 'editTask') {
+      fetchAnchorList().then(setAnchorOptions).catch(() => setAnchorOptions([]));
+    }
+  }, [activeModal]);
 
   useEffect(() => {
     if (editingTask) {
@@ -29,8 +39,10 @@ export const EditTaskModal: React.FC = () => {
       setSimBase(editingTask.sim_api_base || '');
       setSimKey(editingTask.sim_api_key || '');
       setSimModel(editingTask.sim_model || '');
+      setAnchorFile(editingTask.anchor_guide_file || '');
       setShowLLM(!!(editingTask.gpt_api_base || editingTask.gpt_api_key || editingTask.gpt_model));
       setShowSimLLM(!!(editingTask.sim_api_base || editingTask.sim_api_key || editingTask.sim_model));
+      setShowAnchor(!!editingTask.anchor_guide_file);
     }
   }, [editingTask]);
 
@@ -48,6 +60,7 @@ export const EditTaskModal: React.FC = () => {
         sim_api_base: simBase.trim(),
         sim_api_key: simKey.trim(),
         sim_model: simModel.trim(),
+        anchor_guide_file: anchorFile || '',
       });
       closeModal();
     } catch (e) {
@@ -55,7 +68,7 @@ export const EditTaskModal: React.FC = () => {
     } finally {
       setSubmitting(false);
     }
-  }, [editingTask, name, desc, genType, gptBase, gptKey, gptModel, simBase, simKey, simModel, updateTask, closeModal, setSubmitting]);
+  }, [editingTask, name, desc, genType, gptBase, gptKey, gptModel, simBase, simKey, simModel, anchorFile, updateTask, closeModal, setSubmitting]);
 
   return (
     <Modal
@@ -176,6 +189,31 @@ export const EditTaskModal: React.FC = () => {
               value={simModel}
               onChange={(e) => setSimModel(e.target.value)}
             />
+          </div>
+        </div>
+      )}
+      <div className="mb-1">
+        <button
+          type="button"
+          className="text-xs text-ctp-peach font-semibold hover:underline"
+          onClick={() => setShowAnchor(!showAnchor)}
+        >{showAnchor ? '▾ 앵커 가이드 접기' : '▸ 앵커 가이드 (Phase 2 전략 고정 가이드)'}</button>
+      </div>
+      {showAnchor && (
+        <div className="pl-2 border-l-2 border-ctp-peach/30 mb-3.5 space-y-2.5">
+          <p className="text-[11px] text-[#888]">Phase 2에서 GPT가 프롬프트를 설계할 때 참조하는 고정 가이드입니다. prompts/anchors/ 폴더에서 선택합니다.</p>
+          <div>
+            <label className="block text-xs text-[#666] mb-1 font-semibold">앵커 가이드 파일</label>
+            <select
+              className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-peach focus:outline-none"
+              value={anchorFile}
+              onChange={(e) => setAnchorFile(e.target.value)}
+            >
+              <option value="">사용 안 함</option>
+              {anchorOptions.map((a) => (
+                <option key={a.filename} value={a.filename}>{a.name}</option>
+              ))}
+            </select>
           </div>
         </div>
       )}

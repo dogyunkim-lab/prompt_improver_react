@@ -2,9 +2,24 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 import json
+import os
 from database import get_db
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
+
+ANCHORS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prompts", "anchors")
+
+
+@router.get("/anchors/list")
+async def list_anchors():
+    """prompts/anchors/ 디렉토리의 .txt 파일 목록 반환."""
+    if not os.path.isdir(ANCHORS_DIR):
+        return []
+    files = sorted(
+        f for f in os.listdir(ANCHORS_DIR)
+        if f.endswith(".txt") and os.path.isfile(os.path.join(ANCHORS_DIR, f))
+    )
+    return [{"filename": f, "name": f.rsplit(".", 1)[0]} for f in files]
 
 
 class TaskCreate(BaseModel):
@@ -17,6 +32,7 @@ class TaskCreate(BaseModel):
     sim_api_base: Optional[str] = None
     sim_api_key: Optional[str] = None
     sim_model: Optional[str] = None
+    anchor_guide_file: Optional[str] = None
 
 
 @router.get("")
@@ -41,8 +57,8 @@ async def create_task(body: TaskCreate):
     db = await get_db()
     try:
         async with db.execute(
-            "INSERT INTO tasks (name, description, generation_task, gpt_api_base, gpt_api_key, gpt_model, sim_api_base, sim_api_key, sim_model) VALUES (?,?,?,?,?,?,?,?,?)",
-            (body.name, body.description, body.generation_task, body.gpt_api_base, body.gpt_api_key, body.gpt_model, body.sim_api_base, body.sim_api_key, body.sim_model)
+            "INSERT INTO tasks (name, description, generation_task, gpt_api_base, gpt_api_key, gpt_model, sim_api_base, sim_api_key, sim_model, anchor_guide_file) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (body.name, body.description, body.generation_task, body.gpt_api_base, body.gpt_api_key, body.gpt_model, body.sim_api_base, body.sim_api_key, body.sim_model, body.anchor_guide_file)
         ) as cursor:
             task_id = cursor.lastrowid
         await db.commit()
@@ -81,6 +97,7 @@ class TaskUpdate(BaseModel):
     sim_api_base: Optional[str] = None
     sim_api_key: Optional[str] = None
     sim_model: Optional[str] = None
+    anchor_guide_file: Optional[str] = None
 
 
 @router.patch("/{task_id}")
@@ -120,6 +137,9 @@ async def update_task(task_id: int, body: TaskUpdate):
         if body.sim_model is not None:
             updates.append("sim_model=?")
             values.append(body.sim_model)
+        if body.anchor_guide_file is not None:
+            updates.append("anchor_guide_file=?")
+            values.append(body.anchor_guide_file)
 
         if updates:
             values.append(task_id)

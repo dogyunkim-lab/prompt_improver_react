@@ -12,8 +12,8 @@ interface TaskStore {
   toggleExpand: (taskId: number) => void;
   setSelectedTaskId: (id: number | null) => void;
   loadTasks: () => Promise<void>;
-  createTask: (data: { name: string; description?: string; generation_task?: string; gpt_api_base?: string; gpt_api_key?: string; gpt_model?: string }) => Promise<Task>;
-  updateTask: (id: number, data: { name?: string; description?: string; generation_task?: string; gpt_api_base?: string; gpt_api_key?: string; gpt_model?: string }) => Promise<void>;
+  createTask: (data: { name: string; description?: string; generation_task?: string; gpt_api_base?: string; gpt_api_key?: string; gpt_model?: string; sim_api_base?: string; sim_api_key?: string; sim_model?: string; anchor_guide_file?: string }) => Promise<Task>;
+  updateTask: (id: number, data: { name?: string; description?: string; generation_task?: string; gpt_api_base?: string; gpt_api_key?: string; gpt_model?: string; sim_api_base?: string; sim_api_key?: string; sim_model?: string; anchor_guide_file?: string }) => Promise<void>;
   deleteTask: (id: number) => Promise<void>;
   refreshTasks: () => Promise<void>;
 }

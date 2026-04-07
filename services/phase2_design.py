@@ -20,6 +20,7 @@ CANDIDATE_PROMPT_PATH = "prompts/phase2_candidate.txt"
 REPAIR_PROMPT_PATH = "prompts/phase2_repair.txt"
 JUDGE_SYSTEM_PROMPT_PATH = "prompts/phase4_judge.txt"
 JUDGE_USER_PROMPT_PATH = "prompts/phase4_judge_user.txt"
+ANCHORS_DIR = "prompts/anchors"
 
 NODE_LABELS = ["A", "B", "C"]
 
@@ -279,12 +280,27 @@ async def _get_prev_run_feedback(base_run_id: int, task_id: int) -> tuple[str, i
 
 # ─── Step 1: 전략 수립 ──────────────────────────────────────────────────────
 
+def _load_anchor_guide(filename: str) -> str:
+    """prompts/anchors/ 폴더에서 앵커 가이드 파일 내용을 로드."""
+    if not filename:
+        return ""
+    import os
+    path = os.path.join(ANCHORS_DIR, filename)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        logger.warning(f"앵커 가이드 파일을 찾을 수 없습니다: {path}")
+        return ""
+
+
 def _build_strategy_input(
     task: dict, phase1_summary: dict, experiment_history: str,
     learning_rate: str, converge_text: str,
     improvable_count: int, total_count: int,
     prev_run_feedback: str = "",
-    user_guide: str = ""
+    user_guide: str = "",
+    anchor_guide: str = "",
 ) -> str:
     template = _load_prompt(STRATEGY_PROMPT_PATH)
 
@@ -311,6 +327,10 @@ def _build_strategy_input(
         if common_gaps:
             reference_criteria_section += f"\n\n[Generated가 자주 빠뜨리거나 불필요하게 추가하는 내용 패턴]\n{common_gaps}"
 
+    anchor_guide_section = ""
+    if anchor_guide:
+        anchor_guide_section = f"[앵커 가이드 — 프롬프트 설계 시 반드시 참조]\n{anchor_guide}"
+
     return template.format(
         generation_task=task.get("generation_task", "불편사항 요약"),
         bucket_counts=json.dumps(bucket_counts, ensure_ascii=False),
@@ -326,6 +346,7 @@ def _build_strategy_input(
         prev_run_feedback=prev_run_feedback,
         user_guide=user_guide_section,
         reference_criteria=reference_criteria_section,
+        anchor_guide=anchor_guide_section,
     )
 
 
@@ -414,6 +435,7 @@ async def _generate_single_candidate(
     max_retries: int = 1,
     user_guide: str = "",
     reference_style_profile: str = "",
+    anchor_guide: str = "",
     gpt_config: dict | None = None,
     reasoning: str = "high",
 ) -> dict | None:
@@ -434,6 +456,10 @@ async def _generate_single_candidate(
     if reference_style_profile:
         reference_criteria_section = f"\n[Reference 요약 기준 — LLM이 이 기준에 맞게 요약하도록 프롬프트를 작성하라]\n{reference_style_profile}\n"
 
+    anchor_guide_section = ""
+    if anchor_guide:
+        anchor_guide_section = f"\n[앵커 가이드 — 프롬프트 설계 시 반드시 참조]\n{anchor_guide}\n"
+
     template = _load_prompt(CANDIDATE_PROMPT_PATH)
     prompt = template.format(
         generation_task=task.get("generation_task", "불편사항 요약"),
@@ -448,6 +474,7 @@ async def _generate_single_candidate(
         representative_cases=cases_text,
         user_guide=user_guide_section,
         reference_criteria=reference_criteria_section,
+        anchor_guide=anchor_guide_section,
     )
 
     for attempt in range(max_retries + 1):
@@ -921,6 +948,16 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
         if reference_style_profile:
             yield collector.log("info", f"Reference 요약 기준 프로파일 로드됨 ({len(reference_style_profile)}자)")
 
+        # 앵커 가이드 로드
+        anchor_guide_file = task.get("anchor_guide_file", "")
+        anchor_guide = ""
+        if anchor_guide_file:
+            anchor_guide = _load_anchor_guide(anchor_guide_file)
+            if anchor_guide:
+                yield collector.log("info", f"앵커 가이드 로드됨: {anchor_guide_file} ({len(anchor_guide)}자)")
+            else:
+                yield collector.log("warn", f"앵커 가이드 파일 로드 실패: {anchor_guide_file}")
+
         yield collector.log("info", f"Design mode: {design_mode}, Learning rate: {learning_rate}")
 
         # ════════════════════════════════════════════════════════════════════
@@ -933,6 +970,7 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
             learning_rate, converge_text, improvable_count, total_count,
             prev_run_feedback=prev_run_feedback,
             user_guide=user_guide,
+            anchor_guide=anchor_guide,
         )
         strategy_result = await _call_strategy_step(strategy_prompt, max_retries=1, gpt_config=gpt_config, reasoning=reasoning)
 
@@ -960,6 +998,7 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
             _generate_single_candidate(sc, design_summary, task, improvable_cases,
                                        user_guide=user_guide,
                                        reference_style_profile=reference_style_profile,
+                                       anchor_guide=anchor_guide,
                                        gpt_config=gpt_config,
                                        reasoning=reasoning)
             for sc in strategy_candidates

@@ -5,7 +5,16 @@ export function fetchTasks(): Promise<Task[]> {
   return apiFetch<Task[]>('/api/tasks');
 }
 
-export function createTask(data: { name: string; description?: string; generation_task?: string; gpt_api_base?: string; gpt_api_key?: string; gpt_model?: string; sim_api_base?: string; sim_api_key?: string; sim_model?: string }): Promise<Task> {
+export function fetchAnchorList(): Promise<{ filename: string; name: string }[]> {
+  return apiFetch('/api/tasks/anchors/list');
+}
+
+export function createTask(data: {
+  name: string; description?: string; generation_task?: string;
+  gpt_api_base?: string; gpt_api_key?: string; gpt_model?: string;
+  sim_api_base?: string; sim_api_key?: string; sim_model?: string;
+  anchor_guide_file?: string;
+}): Promise<Task> {
   return apiFetch<Task>('/api/tasks', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -13,7 +22,12 @@ export function createTask(data: { name: string; description?: string; generatio
   });
 }
 
-export function updateTask(id: number, data: { name?: string; description?: string; generation_task?: string; gpt_api_base?: string; gpt_api_key?: string; gpt_model?: string; sim_api_base?: string; sim_api_key?: string; sim_model?: string }): Promise<Task> {
+export function updateTask(id: number, data: {
+  name?: string; description?: string; generation_task?: string;
+  gpt_api_base?: string; gpt_api_key?: string; gpt_model?: string;
+  sim_api_base?: string; sim_api_key?: string; sim_model?: string;
+  anchor_guide_file?: string;
+}): Promise<Task> {
   return apiFetch<Task>(`/api/tasks/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
