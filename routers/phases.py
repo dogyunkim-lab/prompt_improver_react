@@ -80,8 +80,8 @@ async def _run_and_queue(generator, run_id: int, phase: int):
     finally:
         await q.put(None)
         _running_tasks.pop(key, None)
-        # 완료 후 버퍼 정리 (메모리 절약)
-        _event_buffers.pop(key, None)
+        # 버퍼는 유지 — 늦게 연결하는 클라이언트가 리플레이 가능
+        # 다음 실행 시 _run_and_queue 시작부에서 초기화됨
 
 
 def _create_phase_task(generator, run_id: int, phase: int) -> asyncio.Task:

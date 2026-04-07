@@ -15,7 +15,10 @@ interface SSECallbacks {
   onError?: (err: Event) => void;
 }
 
-const FLUSH_INTERVAL = 300; // ms - flush batched updates every 300ms
+const FLUSH_INTERVAL = 300;
+const MAX_RETRIES = 5;
+const RETRY_BASE_MS = 500;
+const HEALTH_CHECK_MS = 3000;
 
 export function useSSEBuffered(
   runId: number | null,
@@ -32,6 +35,9 @@ export function useSSEBuffered(
   const caseBuffer = useRef<unknown[]>([]);
   const lastProgress = useRef<{ current: number; total: number } | null>(null);
   const flushTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const healthTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const retryCount = useRef(0);
+  const doneReceived = useRef(false);
 
   const flush = useCallback(() => {
     const cb = cbRef.current;
@@ -57,31 +63,35 @@ export function useSSEBuffered(
     }
   }, []);
 
-  const close = useCallback(() => {
+  const closeConnection = useCallback(() => {
+    if (healthTimer.current) {
+      clearInterval(healthTimer.current);
+      healthTimer.current = null;
+    }
     if (flushTimer.current) {
       clearInterval(flushTimer.current);
       flushTimer.current = null;
     }
-    flush(); // flush remaining data
+    flush();
     if (esRef.current) {
       esRef.current.close();
       esRef.current = null;
     }
   }, [flush]);
 
-  useEffect(() => {
-    if (!active || runId == null || phase == null) {
-      close();
-      return;
+  const openConnection = useCallback(() => {
+    if (runId == null || phase == null) return;
+    // 기존 연결 정리
+    if (esRef.current) {
+      esRef.current.close();
+      esRef.current = null;
     }
-
-    if (esRef.current) return;
 
     const url = `/api/runs/${runId}/phase/${phase}/stream`;
     const es = new EventSource(url);
     esRef.current = es;
+    doneReceived.current = false;
 
-    // Start flush interval
     flushTimer.current = setInterval(flush, FLUSH_INTERVAL);
 
     es.onmessage = (ev) => {
@@ -98,15 +108,20 @@ export function useSSEBuffered(
             caseBuffer.current.push(data.data);
             break;
           case 'result':
-            flush(); // flush pending before result
+            flush();
             cbRef.current.onResult?.(data.data);
             break;
           case 'done':
-            flush(); // flush pending before done
+            flush();
+            doneReceived.current = true;
             cbRef.current.onDone?.(data.status);
             if (flushTimer.current) {
               clearInterval(flushTimer.current);
               flushTimer.current = null;
+            }
+            if (healthTimer.current) {
+              clearInterval(healthTimer.current);
+              healthTimer.current = null;
             }
             es.close();
             esRef.current = null;
@@ -117,16 +132,95 @@ export function useSSEBuffered(
       }
     };
 
-    es.onerror = (err) => {
-      flush();
-      cbRef.current.onError?.(err);
-      close();
+    es.onerror = () => {
+      // 이미 done을 받았으면 에러 무시
+      if (doneReceived.current) return;
+
+      // 연결 에러 시 정리 후 재시도
+      es.close();
+      esRef.current = null;
+      if (flushTimer.current) {
+        clearInterval(flushTimer.current);
+        flushTimer.current = null;
+      }
+
+      if (retryCount.current < MAX_RETRIES) {
+        const delay = RETRY_BASE_MS * Math.pow(2, retryCount.current);
+        retryCount.current++;
+        setTimeout(() => {
+          // active 상태이고 done을 아직 안 받았으면 재연결
+          if (!doneReceived.current && runId != null && phase != null) {
+            openConnection();
+          }
+        }, delay);
+      }
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runId, phase, flush]);
+
+  // 메인 연결 관리
+  useEffect(() => {
+    if (!active || runId == null || phase == null) {
+      closeConnection();
+      retryCount.current = 0;
+      doneReceived.current = false;
+      return;
+    }
+
+    // 이미 살아있는 연결이 있으면 스킵
+    if (esRef.current && esRef.current.readyState !== EventSource.CLOSED) {
+      return;
+    }
+
+    retryCount.current = 0;
+    doneReceived.current = false;
+    openConnection();
 
     return () => {
-      close();
+      closeConnection();
     };
-  }, [runId, phase, active, close, flush]);
+  }, [runId, phase, active, openConnection, closeConnection]);
 
-  return { close };
+  // 탭 전환 시 연결 상태 확인 + 재연결
+  useEffect(() => {
+    if (!active || runId == null || phase == null) return;
+
+    const handleVisibility = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (doneReceived.current) return;
+
+      // 탭이 다시 보일 때 연결 상태 확인
+      const es = esRef.current;
+      if (!es || es.readyState === EventSource.CLOSED) {
+        retryCount.current = 0;
+        openConnection();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [active, runId, phase, openConnection]);
+
+  // 주기적 연결 상태 확인 (3초마다)
+  useEffect(() => {
+    if (!active || runId == null || phase == null) return;
+
+    healthTimer.current = setInterval(() => {
+      if (doneReceived.current) return;
+      const es = esRef.current;
+      if (!es || es.readyState === EventSource.CLOSED) {
+        retryCount.current = 0;
+        openConnection();
+      }
+    }, HEALTH_CHECK_MS);
+
+    return () => {
+      if (healthTimer.current) {
+        clearInterval(healthTimer.current);
+        healthTimer.current = null;
+      }
+    };
+  }, [active, runId, phase, openConnection]);
+
+  return { close: closeConnection };
 }

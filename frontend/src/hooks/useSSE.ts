@@ -12,6 +12,10 @@ interface SSECallbacks {
   onError?: (err: Event) => void;
 }
 
+const MAX_RETRIES = 5;
+const RETRY_BASE_MS = 500;
+const HEALTH_CHECK_MS = 3000;
+
 export function useSSE(
   runId: number | null,
   phase: number | null,
@@ -21,26 +25,32 @@ export function useSSE(
   const esRef = useRef<EventSource | null>(null);
   const cbRef = useRef(callbacks);
   cbRef.current = callbacks;
+  const retryCount = useRef(0);
+  const doneReceived = useRef(false);
+  const healthTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const close = useCallback(() => {
+  const closeConnection = useCallback(() => {
+    if (healthTimer.current) {
+      clearInterval(healthTimer.current);
+      healthTimer.current = null;
+    }
     if (esRef.current) {
       esRef.current.close();
       esRef.current = null;
     }
   }, []);
 
-  useEffect(() => {
-    if (!active || runId == null || phase == null) {
-      close();
-      return;
+  const openConnection = useCallback(() => {
+    if (runId == null || phase == null) return;
+    if (esRef.current) {
+      esRef.current.close();
+      esRef.current = null;
     }
-
-    // Avoid duplicate connections in StrictMode
-    if (esRef.current) return;
 
     const url = `/api/runs/${runId}/phase/${phase}/stream`;
     const es = new EventSource(url);
     esRef.current = es;
+    doneReceived.current = false;
 
     es.onmessage = (ev) => {
       try {
@@ -59,8 +69,14 @@ export function useSSE(
             cbRef.current.onResult?.(data.data);
             break;
           case 'done':
+            doneReceived.current = true;
             cbRef.current.onDone?.(data.status);
-            close();
+            if (healthTimer.current) {
+              clearInterval(healthTimer.current);
+              healthTimer.current = null;
+            }
+            es.close();
+            esRef.current = null;
             break;
         }
       } catch {
@@ -68,15 +84,84 @@ export function useSSE(
       }
     };
 
-    es.onerror = (err) => {
-      cbRef.current.onError?.(err);
-      close();
+    es.onerror = () => {
+      if (doneReceived.current) return;
+      es.close();
+      esRef.current = null;
+
+      if (retryCount.current < MAX_RETRIES) {
+        const delay = RETRY_BASE_MS * Math.pow(2, retryCount.current);
+        retryCount.current++;
+        setTimeout(() => {
+          if (!doneReceived.current && runId != null && phase != null) {
+            openConnection();
+          }
+        }, delay);
+      }
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runId, phase]);
+
+  // 메인 연결 관리
+  useEffect(() => {
+    if (!active || runId == null || phase == null) {
+      closeConnection();
+      retryCount.current = 0;
+      doneReceived.current = false;
+      return;
+    }
+
+    if (esRef.current && esRef.current.readyState !== EventSource.CLOSED) {
+      return;
+    }
+
+    retryCount.current = 0;
+    doneReceived.current = false;
+    openConnection();
 
     return () => {
-      close();
+      closeConnection();
     };
-  }, [runId, phase, active, close]);
+  }, [runId, phase, active, openConnection, closeConnection]);
 
-  return { close };
+  // 탭 전환 시 재연결
+  useEffect(() => {
+    if (!active || runId == null || phase == null) return;
+
+    const handleVisibility = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (doneReceived.current) return;
+      const es = esRef.current;
+      if (!es || es.readyState === EventSource.CLOSED) {
+        retryCount.current = 0;
+        openConnection();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [active, runId, phase, openConnection]);
+
+  // 주기적 연결 상태 확인
+  useEffect(() => {
+    if (!active || runId == null || phase == null) return;
+
+    healthTimer.current = setInterval(() => {
+      if (doneReceived.current) return;
+      const es = esRef.current;
+      if (!es || es.readyState === EventSource.CLOSED) {
+        retryCount.current = 0;
+        openConnection();
+      }
+    }, HEALTH_CHECK_MS);
+
+    return () => {
+      if (healthTimer.current) {
+        clearInterval(healthTimer.current);
+        healthTimer.current = null;
+      }
+    };
+  }, [active, runId, phase, openConnection]);
+
+  return { close: closeConnection };
 }
