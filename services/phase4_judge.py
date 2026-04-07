@@ -123,12 +123,29 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
         async def judge_case(case: dict):
             nonlocal done_count
             async with semaphore:
+                ref = (case.get("reference") or "").strip()
+                gen = (case.get("generated") or "").strip()
+
+                # 사전 판정: reference가 비어있는 케이스
+                if not ref or ref == "없음":
+                    if not gen or gen == "없음":
+                        evaluation, reason = "정답", "reference 없음 — generated도 없음 (정상)"
+                    else:
+                        evaluation, reason = "오답", "reference 없음 — generated가 불필요한 내용 생성"
+                    await db.execute(
+                        "UPDATE case_results SET evaluation=?, reason=? WHERE run_id=? AND case_id=?",
+                        (evaluation, reason, run_id, case["case_id"])
+                    )
+                    await db.commit()
+                    done_count += 1
+                    return evaluation
+
                 user_content = user_template.format(
                     stt=case.get("stt", ""),
                     generation_task=case.get("generation_task", ""),
-                    reference=case.get("reference", ""),
+                    reference=ref,
                     keywords=case.get("keywords", ""),
-                    generated=case.get("generated", ""),
+                    generated=gen,
                 )
                 messages = []
                 if judge_system:

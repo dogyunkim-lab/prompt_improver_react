@@ -23,8 +23,8 @@ async def verify_dify_connection(object_id: str) -> tuple[bool, str]:
 
     try:
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        payload = {"inputs": {}, "response_mode": "blocking", "user": "verify-test"}
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        payload = {"inputs": {"stt": ""}, "response_mode": "blocking", "user": "verify-test"}
+        async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
             resp = await client.post(f"{DIFY_BASE_URL}/workflows/run", json=payload, headers=headers)
             if resp.status_code < 400:
                 return True, f"연결 성공 (HTTP {resp.status_code})"
@@ -44,7 +44,7 @@ async def call_dify_workflow(object_id: str, stt: str) -> dict:
         "response_mode": "blocking",
         "user": "improver-system"
     }
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=120.0, verify=False) as client:
         response = await client.post(f"{DIFY_BASE_URL}/workflows/run", json=payload, headers=headers)
         response.raise_for_status()
         data = response.json()
@@ -117,9 +117,23 @@ async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
                     yield collector.log("info",
                         f"노드-변수 매핑: {', '.join(f'Node {v}→{k}' for k, v in output_var_to_node.items())}")
 
+        # 최종 출력 변수 결정: 마지막 노드(C>B>A)의 output_var
+        final_output_var = None
+        if output_var_to_node:
+            for label in ('c', 'b', 'a'):
+                matching = [k for k, v in output_var_to_node.items() if v == label.upper()]
+                if matching:
+                    final_output_var = matching[0]
+                    break
+        if final_output_var:
+            yield collector.log("info", f"최종 출력 변수: '{final_output_var}'")
+        else:
+            yield collector.log("info", "최종 출력 변수 매핑 없음 — 'generated' 또는 첫 번째 출력 사용")
+
         semaphore = asyncio.Semaphore(DIFY_CONCURRENCY)
         completed = 0
         errors = 0
+        first_logged = False
 
         conn = connections[0]  # 첫 번째 연결 사용
 
@@ -135,11 +149,38 @@ async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
                             case.get("stt", "")
                         )
                         elapsed = round(time.time() - start_t, 1)
-                        generated = outputs.get("generated", "")
-                        # generated 외 나머지 = 중간 노드 출력 (노드 라벨 매핑 포함)
+
+                        # 최종 generated 텍스트 결정 (우선순위)
+                        generated = ""
+                        used_key = None
+
+                        # 1순위: 명시적 "generated" 키
+                        if outputs.get("generated"):
+                            generated = outputs["generated"]
+                            used_key = "generated"
+                        # 2순위: 마지막 노드의 output_var
+                        elif final_output_var and outputs.get(final_output_var):
+                            generated = str(outputs[final_output_var])
+                            used_key = final_output_var
+                        # 3순위: output_var_to_node에 없는 키 중 첫 번째 비어있지 않은 값
+                        if not generated:
+                            for k, v in outputs.items():
+                                if k not in output_var_to_node and v:
+                                    generated = str(v)
+                                    used_key = k
+                                    break
+                        # 4순위: 아무 비어있지 않은 값
+                        if not generated:
+                            for k, v in outputs.items():
+                                if v:
+                                    generated = str(v)
+                                    used_key = k
+                                    break
+
+                        # 중간 노드 출력 (generated로 사용한 키 제외)
                         intermediate = {}
                         for k, v in outputs.items():
-                            if k == "generated":
+                            if k == used_key or k == "generated":
                                 continue
                             node_label = output_var_to_node.get(k)
                             if node_label:
@@ -147,7 +188,8 @@ async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
                             else:
                                 intermediate[k] = {"node": "?", "content": str(v) if v else ""}
                         return {"ok": True, "case_id": case_id, "generated": generated,
-                                "intermediate": intermediate, "elapsed": elapsed}
+                                "intermediate": intermediate, "elapsed": elapsed,
+                                "output_keys": list(outputs.keys()), "used_key": used_key}
                     except Exception as e:
                         if attempt < 2:
                             await asyncio.sleep(2)
@@ -164,16 +206,24 @@ async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
                 done_count += 1
 
                 if result["ok"]:
+                    # 첫 번째 성공 케이스: Dify 출력 키 진단 로깅
+                    if not first_logged:
+                        first_logged = True
+                        yield collector.log("info",
+                            f"Dify 출력 키: {result.get('output_keys', [])} → "
+                            f"generated로 사용: '{result.get('used_key', '?')}' "
+                            f"(길이: {len(result.get('generated', ''))}자)")
                     # 메인 루프에서 단일 커넥션으로 직접 DB 저장 (동시 접근 없음)
                     intermediate = result["intermediate"]
+                    gen_text = result["generated"]
                     await db.execute(
                         "UPDATE case_results SET generated=?, intermediate_outputs=? WHERE run_id=? AND case_id=?",
-                        (result["generated"],
+                        (gen_text,
                          json.dumps(intermediate, ensure_ascii=False) if intermediate else None,
                          run_id, result["case_id"])
                     )
                     completed += 1
-                    yield collector.log("ok", f"완료 ({result['elapsed']}s)")
+                    yield collector.log("ok", f"[{result['case_id']}] 완료 ({result['elapsed']}s, {len(gen_text)}자)")
                 else:
                     errors += 1
                     yield collector.log("warn", f"실패: {result.get('error', 'unknown')}")
