@@ -1,6 +1,7 @@
 import React, { useCallback, useMemo, useEffect } from 'react';
 import { usePhaseStore } from '../../stores/phaseStore';
 import { useRunStore } from '../../stores/runStore';
+import { useTaskStore } from '../../stores/taskStore';
 import { useSSE } from '../../hooks/useSSE';
 import { useTableSort } from '../../hooks/useTableSort';
 import { useTableFilter } from '../../hooks/useTableFilter';
@@ -10,7 +11,7 @@ import { ProgressBar } from '../shared/ProgressBar';
 import { DataTable, type Column } from '../shared/DataTable';
 import { CaseDetail } from '../shared/CaseDetail';
 import { runPhase, cancelPhase } from '../../api/phases';
-import { downloadJSON, downloadXLSX } from '../../utils/download';
+import { downloadJudgeResultJSON, downloadXLSX } from '../../utils/download';
 import { fmtPct } from '../../utils/format';
 import { cn } from '../../utils/cn';
 import type { CaseResult } from '../../types';
@@ -42,9 +43,11 @@ const DETAIL_FIELDS = [
 
 export const Phase4Panel: React.FC = () => {
   const runStore = useRunStore();
+  const taskStore = useTaskStore();
   const ps = usePhaseStore();
   const runId = runStore.selectedRunId;
   const runData = runStore.runData;
+  const currentTask = taskStore.tasks.find((t) => t.id === taskStore.selectedTaskId);
 
   const isRunning = ps.phaseStatus[4] === 'running';
 
@@ -150,7 +153,11 @@ export const Phase4Panel: React.FC = () => {
         <h4 className="text-[13px] text-[#555] mb-3">케이스 목록</h4>
         <div className="flex gap-1.5 mb-2">
           <button className="py-1 px-2.5 text-xs border border-[#555] bg-[#2a2a2a] text-[#ccc] rounded cursor-pointer hover:bg-[#3a3a3a]"
-            onClick={() => downloadJSON(ps.p4Cases, `phase4_cases_run${runData?.run_number || ''}.json`)} title="판정 결과를 파일로 다운로드합니다">JSON ⬇</button>
+            onClick={() => downloadJudgeResultJSON(
+              ps.p4Cases,
+              `phase4_judge_result_run${runData?.run_number || ''}.json`,
+              { runNumber: runData?.run_number, generationTask: currentTask?.generation_task },
+            )} title="Judge 결과 JSON (summary + cases 형식)">JSON ⬇</button>
           <button className="py-1 px-2.5 text-xs border border-[#555] bg-[#2a2a2a] text-[#ccc] rounded cursor-pointer hover:bg-[#3a3a3a]"
             onClick={() => downloadXLSX(ps.p4Cases, `phase4_cases_run${runData?.run_number || ''}.xlsx`)} title="판정 결과를 파일로 다운로드합니다">XLSX ⬇</button>
         </div>
