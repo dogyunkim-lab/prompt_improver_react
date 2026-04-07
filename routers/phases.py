@@ -370,6 +370,14 @@ async def trigger_phase4(run_id: int):
             row = await cursor.fetchone()
         if not row or row["status"] != "completed":
             raise HTTPException(status_code=400, detail="Phase 3이 완료되지 않았습니다.")
+        # generated가 실제로 존재하는지 확인 (Phase 3 부분 실패 대응)
+        async with db.execute(
+            "SELECT COUNT(*) as cnt FROM case_results WHERE run_id=? AND generated IS NOT NULL AND generated != ''",
+            (run_id,)
+        ) as cursor:
+            gen_count = (await cursor.fetchone())["cnt"]
+        if gen_count == 0:
+            raise HTTPException(status_code=400, detail="Phase 3에서 생성된 요약이 없습니다. Phase 3을 다시 실행하세요.")
     finally:
         await db.close()
     _create_phase_task(run_phase4(run_id), run_id, 4)

@@ -7,6 +7,10 @@ async def get_db() -> aiosqlite.Connection:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     db = await aiosqlite.connect(DB_PATH)
     db.row_factory = aiosqlite.Row
+    # WAL 모드: 읽기-쓰기 동시 접근 허용, 다중 커넥션 간 최신 데이터 가시성 보장
+    await db.execute("PRAGMA journal_mode=WAL")
+    # busy_timeout: 다른 커넥션이 쓰기 중일 때 최대 5초 대기 (SQLITE_BUSY 방지)
+    await db.execute("PRAGMA busy_timeout=5000")
     return db
 
 

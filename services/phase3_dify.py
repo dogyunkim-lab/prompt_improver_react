@@ -120,6 +120,8 @@ async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
         semaphore = asyncio.Semaphore(DIFY_CONCURRENCY)
         completed = 0
         errors = 0
+        # 케이스별 결과를 수집 후 메인 루프에서 일괄 DB 저장 (커넥션 공유 문제 방지)
+        case_results_queue: asyncio.Queue = asyncio.Queue()
 
         conn = connections[0]  # 첫 번째 연결 사용
 
@@ -146,13 +148,12 @@ async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
                                 intermediate[k] = {"node": node_label, "content": str(v) if v else ""}
                             else:
                                 intermediate[k] = {"node": "?", "content": str(v) if v else ""}
-                        await db.execute(
-                            "UPDATE case_results SET generated=?, intermediate_outputs=? WHERE run_id=? AND case_id=?",
-                            (generated,
-                             json.dumps(intermediate, ensure_ascii=False) if intermediate else None,
-                             run_id, case_id)
-                        )
-                        await db.commit()
+                        # 결과를 큐에 넣고 메인 루프에서 일괄 DB 저장
+                        await case_results_queue.put({
+                            "case_id": case_id,
+                            "generated": generated,
+                            "intermediate": intermediate,
+                        })
                         completed += 1
                         return f"ok:{elapsed}"
                     except Exception as e:
@@ -175,24 +176,67 @@ async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
                 else:
                     yield collector.log("warn", f"실패: {result_str.split(':', 1)[1]}")
                 yield progress_event(done_count, total)
+
+                # 큐에 쌓인 결과를 메인 커넥션에서 일괄 저장 (배치 단위 commit)
+                batch_count = 0
+                while not case_results_queue.empty():
+                    try:
+                        cr = case_results_queue.get_nowait()
+                        await db.execute(
+                            "UPDATE case_results SET generated=?, intermediate_outputs=? WHERE run_id=? AND case_id=?",
+                            (cr["generated"],
+                             json.dumps(cr["intermediate"], ensure_ascii=False) if cr["intermediate"] else None,
+                             run_id, cr["case_id"])
+                        )
+                        batch_count += 1
+                    except asyncio.QueueEmpty:
+                        break
+                if batch_count > 0:
+                    await db.commit()
         finally:
             for t in pending_tasks:
                 if not t.done():
                     t.cancel()
 
+        # 잔여 큐 비우기 (마지막 배치)
+        final_batch = 0
+        while not case_results_queue.empty():
+            try:
+                cr = case_results_queue.get_nowait()
+                await db.execute(
+                    "UPDATE case_results SET generated=?, intermediate_outputs=? WHERE run_id=? AND case_id=?",
+                    (cr["generated"],
+                     json.dumps(cr["intermediate"], ensure_ascii=False) if cr["intermediate"] else None,
+                     run_id, cr["case_id"])
+                )
+                final_batch += 1
+            except asyncio.QueueEmpty:
+                break
+        if final_batch > 0:
+            await db.commit()
+
         msg = f"{total}개 케이스 완료 (오류: {errors}건)"
         yield collector.log("ok" if errors == 0 else "warn", msg)
 
         output = {"total": total, "completed": completed, "errors": errors}
+
+        # 전체 실패 시 failed 처리 (Phase 4가 빈 데이터로 시작하는 것 방지)
+        if completed == 0:
+            final_status = "failed"
+            run_status = "failed"
+        else:
+            final_status = "completed"
+            run_status = "phase3_done"
+
         await db.execute(
-            "UPDATE phase_results SET status='completed', output_data=?, log_text=?, completed_at=? WHERE run_id=? AND phase=3",
-            (json.dumps(output), collector.get_text(), datetime.utcnow().isoformat(), run_id)
+            "UPDATE phase_results SET status=?, output_data=?, log_text=?, completed_at=? WHERE run_id=? AND phase=3",
+            (final_status, json.dumps(output), collector.get_text(), datetime.utcnow().isoformat(), run_id)
         )
-        await db.execute("UPDATE runs SET status='phase3_done' WHERE id=?", (run_id,))
+        await db.execute("UPDATE runs SET status=? WHERE id=?", (run_status, run_id))
         await db.commit()
 
         yield result_event(output)
-        yield done_event("completed")
+        yield done_event(final_status)
 
     except Exception as e:
         yield collector.log("error", f"Phase 3 오류: {e}")
