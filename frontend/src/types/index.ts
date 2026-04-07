@@ -127,6 +127,9 @@ export interface CandidateNode {
 export interface MiniValidationDetail {
   case_id: string;
   evaluation: string;
+  reason?: string;
+  stt?: string;
+  reference?: string;
   generated_preview?: string;
   error?: string;
 }

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { cn } from '../../utils/cn';
-import type { MiniValidationSummary } from '../../types';
+import type { MiniValidationSummary, MiniValidationDetail } from '../../types';
 
 interface Props {
   data: MiniValidationSummary;
@@ -46,54 +46,70 @@ const CandidateGroup: React.FC<{ result: MiniValidationSummary['candidate_result
         </span>
       </div>
 
-      <table className="w-full text-[12px]">
-        <thead>
-          <tr className="bg-warm-table-bg text-warm-muted">
-            <th className="text-left py-1.5 px-3 font-medium w-[100px]">케이스</th>
-            <th className="text-left py-1.5 px-3 font-medium w-[70px]">판정</th>
-            <th className="text-left py-1.5 px-3 font-medium">생성 결과</th>
-          </tr>
-        </thead>
-        <tbody>
-          {result.details.map((d) => (
-            <DetailRow key={d.case_id} detail={d} />
-          ))}
-        </tbody>
-      </table>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[12px] min-w-[700px]">
+          <thead>
+            <tr className="bg-warm-table-bg text-warm-muted">
+              <th className="text-left py-1.5 px-3 font-medium w-[80px]">케이스</th>
+              <th className="text-left py-1.5 px-3 font-medium w-[60px]">판정</th>
+              <th className="text-left py-1.5 px-3 font-medium w-[180px]">사유</th>
+              <th className="text-left py-1.5 px-3 font-medium w-[180px]">STT</th>
+              <th className="text-left py-1.5 px-3 font-medium w-[180px]">Reference</th>
+              <th className="text-left py-1.5 px-3 font-medium w-[180px]">Generated</th>
+            </tr>
+          </thead>
+          <tbody>
+            {result.details.map((d) => (
+              <DetailRow key={d.case_id} detail={d} />
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 };
 
 /* ---- Detail Row ---- */
-const DetailRow: React.FC<{ detail: MiniValidationSummary['candidate_results'][number]['details'][number] }> = ({ detail }) => {
+const DetailRow: React.FC<{ detail: MiniValidationDetail }> = ({ detail }) => {
   const [expanded, setExpanded] = useState(false);
 
-  const evalLower = (detail.evaluation || '').toLowerCase();
-  const evalColor = evalLower.includes('정답') ? 'text-green-600 bg-green-50'
-    : evalLower.includes('과답') ? 'text-yellow-600 bg-yellow-50'
-    : 'text-red-600 bg-red-50';
+  const evalColor = detail.evaluation === '정답' ? 'text-score-good'
+    : detail.evaluation === '과답' ? 'text-score-warn'
+    : 'text-score-bad';
 
-  const preview = detail.generated_preview || detail.error || '';
-  const short = preview.length > 60 ? preview.slice(0, 60) + '...' : preview;
-  const full = preview.length > 200 ? preview.slice(0, 200) + '...' : preview;
+  const truncate = (text: string | undefined, len: number) => {
+    if (!text) return '—';
+    if (!expanded && text.length > len) return text.slice(0, len) + '...';
+    return text;
+  };
 
   return (
     <tr
-      className="border-t border-warm-table-border hover:bg-warm-hover cursor-pointer transition-colors"
+      className={cn(
+        'border-t border-warm-table-border hover:bg-warm-hover cursor-pointer transition-colors',
+        detail.evaluation === '오답' ? 'bg-ctp-red/10' : detail.evaluation === '과답' ? 'bg-ctp-yellow/20' : '',
+      )}
       onClick={() => setExpanded((v) => !v)}
     >
-      <td className="py-1.5 px-3 font-mono text-[11px]">{detail.case_id}</td>
-      <td className="py-1.5 px-3">
-        <span className={cn('inline-block py-0.5 px-2 rounded text-[11px] font-semibold', evalColor)}>
+      <td className="py-1.5 px-3 font-mono text-[11px] align-top">{detail.case_id}</td>
+      <td className="py-1.5 px-3 align-top">
+        <span className={cn('font-semibold', evalColor)}>
           {detail.evaluation || '평가실패'}
         </span>
       </td>
-      <td className="py-1.5 px-3 text-[11px] text-[#555] leading-normal">
-        {expanded ? (
-          <div className="whitespace-pre-wrap">&quot;{full}&quot;</div>
-        ) : (
-          <span>&quot;{short}&quot;</span>
-        )}
+      <td className="py-1.5 px-3 text-[11px] text-[#555] leading-normal align-top">
+        <div className={expanded ? 'whitespace-pre-wrap' : 'line-clamp-2'}>{truncate(detail.reason, 80)}</div>
+      </td>
+      <td className="py-1.5 px-3 text-[11px] text-[#555] leading-normal align-top">
+        <div className={expanded ? 'whitespace-pre-wrap' : 'line-clamp-2'}>{truncate(detail.stt, 80)}</div>
+      </td>
+      <td className="py-1.5 px-3 text-[11px] text-[#555] leading-normal align-top">
+        <div className={expanded ? 'whitespace-pre-wrap' : 'line-clamp-2'}>{truncate(detail.reference, 80)}</div>
+      </td>
+      <td className="py-1.5 px-3 text-[11px] text-[#555] leading-normal align-top">
+        <div className={expanded ? 'whitespace-pre-wrap' : 'line-clamp-2'}>
+          {truncate(detail.generated_preview || detail.error, 80)}
+        </div>
       </td>
     </tr>
   );

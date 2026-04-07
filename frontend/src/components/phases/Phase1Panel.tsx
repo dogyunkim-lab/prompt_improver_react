@@ -245,7 +245,7 @@ export const Phase1Panel: React.FC = () => {
 
       <div className="bg-warm-card rounded-[10px] p-4 mb-4 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
         <h4 className="text-[13px] text-[#555] mb-1" title="현재 사용 중인 프롬프트를 제공하면, GPT가 프롬프트 누락/위반까지 정밀 분석합니다.">현재 요약 프롬프트 업로드 (선택)</h4>
-        <p className="text-[11px] text-warm-muted mb-2">현재 사용 중인 요약 프롬프트 TXT 파일을 제공하면, Phase 1 분석 시 프롬프트 ��락/위반 여부를 정확히 판단할 수 있습니다.</p>
+        <p className="text-[11px] text-warm-muted mb-2">현재 사용 중인 요약 프롬프트 TXT 파일을 제공하면, Phase 1 분석 시 프롬프트 누락/위반 여부를 정확히 판단할 수 있습니다.</p>
         <FileDropZone
           onFile={(f) => setPromptFile(f)}
           accept=".txt,.md"
@@ -258,7 +258,7 @@ export const Phase1Panel: React.FC = () => {
             onClick={onUploadPrompt}
             disabled={!runId || !promptFile || uploading}
             title="파일을 서버에 업로드합니다"
-          >���롬프트 업로드</button>
+          >프롬프트 업로드</button>
           {promptFileName && <span className="text-xs text-warm-muted">✓ {promptFileName}</span>}
         </div>
       </div>

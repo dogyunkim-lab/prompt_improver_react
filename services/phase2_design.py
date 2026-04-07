@@ -589,10 +589,19 @@ async def _repair_candidate(
 
 # ─── Mini-Validation (Phase 2 내 간이 검증) ────────────────────────────────
 
+import re as _re
+
 class SafeDict(dict):
     """format_map용: 알 수 없는 {var}는 그대로 유지, KeyError 방지."""
     def __missing__(self, key):
         return '{' + key + '}'
+
+
+def _dify_to_python_vars(text: str) -> str:
+    """Dify 스타일 {{var}} → Python format 스타일 {var} 변환.
+    GPT가 생성한 프롬프트는 Dify 변수 규칙(이중 중괄호)을 따르므로
+    시뮬레이션 시 Python format_map이 치환할 수 있도록 단일 중괄호로 변환한다."""
+    return _re.sub(r'\{\{(\w+)\}\}', r'{\1}', text)
 
 
 async def _select_validation_cases(
@@ -685,9 +694,11 @@ async def _simulate_workflow_for_case(
             if legacy:
                 usr_prompt = legacy
 
-        # SafeDict로 변수 치환 (이전 노드의 output_var 값도 포함)
-        sys_rendered = sys_prompt.format_map(SafeDict(**pool)) if sys_prompt else ""
-        usr_rendered = usr_prompt.format_map(SafeDict(**pool)) if usr_prompt else ""
+        # Dify 스타일 {{var}} → Python {var} 변환 후 변수 치환
+        sys_norm = _dify_to_python_vars(sys_prompt)
+        usr_norm = _dify_to_python_vars(usr_prompt)
+        sys_rendered = sys_norm.format_map(SafeDict(**pool)) if sys_norm else ""
+        usr_rendered = usr_norm.format_map(SafeDict(**pool)) if usr_norm else ""
 
         messages = []
         if sys_rendered:
@@ -718,8 +729,8 @@ async def _mini_judge(
     case: dict, generated: str,
     judge_sys: str, judge_user_tmpl: str,
     gpt_config: dict | None = None,
-) -> str:
-    """Phase 4 Judge 프롬프트로 간이 판정. 정답/과답/오답/평가실패 반환."""
+) -> tuple[str, str]:
+    """Phase 4 Judge 프롬프트로 간이 판정. (evaluation, reason) 튜플 반환."""
     try:
         user_content = judge_user_tmpl.format(
             stt=case.get("stt", ""),
@@ -746,12 +757,14 @@ async def _mini_judge(
         raw = await call_gpt(messages, reasoning="low", **(gpt_config or {}))
         result = _extract_judge_json(raw)
         evaluation = result.get("rating", "평가실패")
+        reason = result.get("reason", "")
         if evaluation == "평가실패":
             evaluation, _ = _classify_judge_text(raw)
-        return evaluation
+            reason = reason or raw[:200]
+        return evaluation, reason
     except Exception as e:
         logger.warning(f"[mini-judge] 판정 실패: {e}")
-        return "평가실패"
+        return "평가실패", str(e)
 
 
 async def _run_mini_validation(
@@ -784,10 +797,13 @@ async def _run_mini_validation(
                 # 워크플로우 시뮬레이션은 sim_config (생성 모델) 사용
                 generated = await _simulate_workflow_for_case(candidate, case, sim_config)
                 # Judge 판정은 gpt_config (분석 모델) 사용
-                evaluation = await _mini_judge(case, generated, judge_sys, judge_user_tmpl, gpt_config)
+                evaluation, reason = await _mini_judge(case, generated, judge_sys, judge_user_tmpl, gpt_config)
                 return {
                     "case_id": case.get("case_id", ""),
                     "evaluation": evaluation,
+                    "reason": reason,
+                    "stt": case.get("stt", ""),
+                    "reference": case.get("reference", ""),
                     "generated_preview": generated[:200] if generated else "",
                 }
             except Exception as e:
@@ -795,6 +811,10 @@ async def _run_mini_validation(
                 return {
                     "case_id": case.get("case_id", ""),
                     "evaluation": "평가실패",
+                    "reason": "",
+                    "stt": case.get("stt", ""),
+                    "reference": case.get("reference", ""),
+                    "generated_preview": "",
                     "error": str(e),
                 }
 
