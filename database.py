@@ -165,6 +165,10 @@ async def init_db():
             "ALTER TABLE tasks ADD COLUMN gpt_api_base TEXT",
             "ALTER TABLE tasks ADD COLUMN gpt_api_key TEXT",
             "ALTER TABLE tasks ADD COLUMN gpt_model TEXT",
+            # 시뮬레이션(생성) 모델 설정 (mini-validation용)
+            "ALTER TABLE tasks ADD COLUMN sim_api_base TEXT",
+            "ALTER TABLE tasks ADD COLUMN sim_api_key TEXT",
+            "ALTER TABLE tasks ADD COLUMN sim_model TEXT",
         ]
         for stmt in _migration_stmts:
             try:

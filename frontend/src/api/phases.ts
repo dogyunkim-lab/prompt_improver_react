@@ -44,6 +44,27 @@ export function fetchPhase5(runId: number) {
   return apiFetch<Phase5Data>(`/api/runs/${runId}/phase/5`);
 }
 
+export function saveCustomCandidate(
+  runId: number,
+  data: {
+    node_count: number;
+    nodes: {
+      label: string;
+      system_prompt: string;
+      user_prompt: string;
+      input_vars: string[];
+      output_var: string;
+      reasoning: boolean;
+    }[];
+  },
+): Promise<{ ok: boolean; candidate_id: number }> {
+  return apiFetch(`/api/runs/${runId}/custom-candidate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+}
+
 export function getSSEUrl(runId: number, phase: number): string {
   return `/api/runs/${runId}/phase/${phase}/stream`;
 }

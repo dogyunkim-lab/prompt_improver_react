@@ -4,16 +4,22 @@ import logging
 from datetime import datetime
 from typing import AsyncGenerator
 from database import get_db
-from services.gpt_client import call_gpt, get_task_gpt_config
+from services.gpt_client import call_gpt, get_task_gpt_config, get_task_sim_config
 from services.delta import compute_learning_rate, count_completed_runs
 from services.experiment_history import build_experiment_history
 from services.sse_helpers import log_event, result_event, done_event, LogCollector
+from services.phase4_judge import (
+    _classify_from_text as _classify_judge_text,
+    _extract_json as _extract_judge_json,
+)
 
 logger = logging.getLogger(__name__)
 
 STRATEGY_PROMPT_PATH = "prompts/phase2_strategy.txt"
 CANDIDATE_PROMPT_PATH = "prompts/phase2_candidate.txt"
 REPAIR_PROMPT_PATH = "prompts/phase2_repair.txt"
+JUDGE_SYSTEM_PROMPT_PATH = "prompts/phase4_judge.txt"
+JUDGE_USER_PROMPT_PATH = "prompts/phase4_judge_user.txt"
 
 NODE_LABELS = ["A", "B", "C"]
 
@@ -549,6 +555,222 @@ async def _repair_candidate(
         return candidate
 
 
+# ─── Mini-Validation (Phase 2 내 간이 검증) ────────────────────────────────
+
+class SafeDict(dict):
+    """format_map용: 알 수 없는 {var}는 그대로 유지, KeyError 방지."""
+    def __missing__(self, key):
+        return '{' + key + '}'
+
+
+async def _select_validation_cases(
+    run_id: int, improvable_cases: list, max_cases: int = 3
+) -> list[dict]:
+    """Phase 1 오답 케이스 중 validation용 케이스 선별.
+    DB에서 full stt/reference/keywords/generation_task 조회."""
+    if not improvable_cases:
+        return []
+
+    # 우선순위: prompt_missing > error_pattern 빈도순(리스트 순서)
+    sorted_cases = sorted(
+        improvable_cases,
+        key=lambda c: (0 if c.get("bucket") == "prompt_missing" else 1),
+    )
+    selected = sorted_cases[:max_cases]
+
+    case_ids = [c["case_id"] for c in selected]
+    if not case_ids:
+        return []
+
+    db = await get_db()
+    try:
+        placeholders = ",".join("?" for _ in case_ids)
+        async with db.execute(
+            f"""SELECT case_id, stt, reference, keywords, generation_task
+                FROM case_results WHERE run_id=? AND case_id IN ({placeholders})""",
+            [run_id] + case_ids,
+        ) as cursor:
+            rows = {row["case_id"]: dict(row) for row in await cursor.fetchall()}
+
+        result = []
+        for c in selected:
+            db_row = rows.get(c["case_id"])
+            if db_row:
+                result.append(db_row)
+        return result
+    finally:
+        await db.close()
+
+
+async def _simulate_workflow_for_case(
+    candidate: dict, case: dict, sim_config: dict | None = None
+) -> str:
+    """후보의 multi-node workflow를 시뮬레이션 모델(sim_config)로 실행.
+    Dify 워크플로우와 동일하게 입력 → LLM Node 1 → LLM Node 2 → ... → 최종 답변 순서로 실행.
+    각 노드의 output_var가 다음 노드의 input_vars로 전달된다.
+    마지막 노드 결과(pool['generated'])를 반환."""
+    pool = {
+        "stt": case.get("stt", ""),
+        "reference": case.get("reference", ""),
+        "keywords": case.get("keywords", ""),
+        "generation_task": case.get("generation_task", ""),
+    }
+
+    nodes = candidate.get("nodes", [])
+    last_result = ""
+
+    for i, node in enumerate(nodes):
+        node_label = node.get("node_label", NODE_LABELS[i] if i < len(NODE_LABELS) else f"N{i}")
+        sys_prompt = (node.get("system_prompt") or "").strip()
+        usr_prompt = (node.get("user_prompt") or "").strip()
+
+        # 프롬프트가 없으면 legacy prompt 필드 사용
+        if not sys_prompt and not usr_prompt:
+            legacy = (node.get("prompt") or "").strip()
+            if legacy:
+                usr_prompt = legacy
+
+        # SafeDict로 변수 치환 (이전 노드의 output_var 값도 포함)
+        sys_rendered = sys_prompt.format_map(SafeDict(**pool)) if sys_prompt else ""
+        usr_rendered = usr_prompt.format_map(SafeDict(**pool)) if usr_prompt else ""
+
+        messages = []
+        if sys_rendered:
+            messages.append({"role": "system", "content": sys_rendered})
+        if usr_rendered:
+            messages.append({"role": "user", "content": usr_rendered})
+
+        if not messages:
+            logger.warning(f"[mini-sim] 노드 {node_label}: 프롬프트 비어있음 — 스킵")
+            continue
+
+        logger.info(f"[mini-sim] 노드 {node_label} 실행 (input_vars: {node.get('input_vars', [])})")
+        result = await call_gpt(messages, reasoning="low", **(sim_config or {}))
+        last_result = result
+
+        # output_var에 결과 저장 → 다음 노드에서 사용 가능
+        output_var = node.get("output_var", "")
+        if output_var:
+            pool[output_var] = result
+            logger.info(f"[mini-sim] 노드 {node_label} → pool['{output_var}'] 저장 ({len(result)}자)")
+
+    # 최종 결과를 generated로도 저장
+    pool["generated"] = last_result
+    return last_result
+
+
+async def _mini_judge(
+    case: dict, generated: str,
+    judge_sys: str, judge_user_tmpl: str,
+    gpt_config: dict | None = None,
+) -> str:
+    """Phase 4 Judge 프롬프트로 간이 판정. 정답/과답/오답/평가실패 반환."""
+    try:
+        user_content = judge_user_tmpl.format(
+            stt=case.get("stt", ""),
+            generation_task=case.get("generation_task", ""),
+            reference=case.get("reference", ""),
+            keywords=case.get("keywords", ""),
+            generated=generated,
+        )
+    except KeyError:
+        user_content = judge_user_tmpl.format_map(SafeDict(
+            stt=case.get("stt", ""),
+            generation_task=case.get("generation_task", ""),
+            reference=case.get("reference", ""),
+            keywords=case.get("keywords", ""),
+            generated=generated,
+        ))
+
+    messages = []
+    if judge_sys:
+        messages.append({"role": "system", "content": judge_sys})
+    messages.append({"role": "user", "content": user_content})
+
+    try:
+        raw = await call_gpt(messages, reasoning="low", **(gpt_config or {}))
+        result = _extract_judge_json(raw)
+        evaluation = result.get("rating", "평가실패")
+        if evaluation == "평가실패":
+            evaluation, _ = _classify_judge_text(raw)
+        return evaluation
+    except Exception as e:
+        logger.warning(f"[mini-judge] 판정 실패: {e}")
+        return "평가실패"
+
+
+async def _run_mini_validation(
+    candidates: list, validation_cases: list,
+    gpt_config: dict | None = None,
+    sim_config: dict | None = None,
+    concurrency: int = 5,
+) -> list[dict]:
+    """모든 후보에 대해 validation_cases로 시뮬+판정 수행.
+    - 워크플로우 시뮬레이션: sim_config (생성 모델, 예: qwen3.5-35B-A3B)
+    - Judge 판정: gpt_config (분석 모델, 예: gpt-oss-120B)
+    각 후보에 mini_validation 필드를 부착하고, pass_rate 내림차순 정렬하여 반환."""
+    # Judge 프롬프트 1회 로드
+    try:
+        judge_sys = _load_prompt(JUDGE_SYSTEM_PROMPT_PATH)
+        judge_user_tmpl = _load_prompt(JUDGE_USER_PROMPT_PATH)
+    except FileNotFoundError:
+        logger.warning("[mini-validation] Judge 프롬프트 파일 없음 — validation 스킵")
+        return candidates
+
+    if not judge_user_tmpl:
+        logger.warning("[mini-validation] Judge user 프롬프트 비어있음 — validation 스킵")
+        return candidates
+
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _evaluate_one(candidate: dict, case: dict) -> dict:
+        async with semaphore:
+            try:
+                # 워크플로우 시뮬레이션은 sim_config (생성 모델) 사용
+                generated = await _simulate_workflow_for_case(candidate, case, sim_config)
+                # Judge 판정은 gpt_config (분석 모델) 사용
+                evaluation = await _mini_judge(case, generated, judge_sys, judge_user_tmpl, gpt_config)
+                return {
+                    "case_id": case.get("case_id", ""),
+                    "evaluation": evaluation,
+                    "generated_preview": generated[:200] if generated else "",
+                }
+            except Exception as e:
+                logger.warning(f"[mini-validation] 후보 {candidate.get('label')}, 케이스 {case.get('case_id')} 실패: {e}")
+                return {
+                    "case_id": case.get("case_id", ""),
+                    "evaluation": "평가실패",
+                    "error": str(e),
+                }
+
+    for candidate in candidates:
+        tasks = [_evaluate_one(candidate, case) for case in validation_cases]
+        details = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 예외 처리
+        clean_details = []
+        for d in details:
+            if isinstance(d, Exception):
+                clean_details.append({"case_id": "", "evaluation": "평가실패", "error": str(d)})
+            else:
+                clean_details.append(d)
+
+        total = len(clean_details)
+        passed = sum(1 for d in clean_details if d["evaluation"] in ("정답", "과답"))
+        pass_rate = round(passed / total, 2) if total > 0 else 0.0
+
+        candidate["mini_validation"] = {
+            "pass_rate": pass_rate,
+            "passed": passed,
+            "total": total,
+            "details": clean_details,
+        }
+
+    # pass_rate 내림차순 정렬
+    candidates.sort(key=lambda c: c.get("mini_validation", {}).get("pass_rate", 0), reverse=True)
+    return candidates
+
+
 # ─── DB 저장 ──────────────────────────────────────────────────────────────
 
 async def _save_candidate_to_db(
@@ -618,6 +840,8 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
 
         # 실험별 GPT 설정 로드
         gpt_config = await get_task_gpt_config(run_id)
+        # 시뮬레이션(생성) 모델 설정 로드 (mini-validation용)
+        sim_config = await get_task_sim_config(run_id)
 
         # Phase 1 결과 조회
         async with db.execute(
@@ -700,9 +924,9 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
         yield collector.log("info", f"Design mode: {design_mode}, Learning rate: {learning_rate}")
 
         # ════════════════════════════════════════════════════════════════════
-        # Step 1/3: 전략 수립
+        # Step 1/4: 전략 수립
         # ════════════════════════════════════════════════════════════════════
-        yield collector.log("info", "Step 1/3: 후보 구조 전략 수립 중...")
+        yield collector.log("info", "Step 1/4: 후보 구조 전략 수립 중...")
 
         strategy_prompt = _build_strategy_input(
             task, phase1_summary, experiment_history,
@@ -728,9 +952,9 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
         yield collector.log("ok", f"전략 수립 완료 — {node_desc}")
 
         # ════════════════════════════════════════════════════════════════════
-        # Step 2/3: 후보별 프롬프트 생성 (병렬)
+        # Step 2/4: 후보별 프롬프트 생성 (병렬)
         # ════════════════════════════════════════════════════════════════════
-        yield collector.log("info", "Step 2/3: 후보별 프롬프트 생성 중...")
+        yield collector.log("info", "Step 2/4: 후보별 프롬프트 생성 중...")
 
         generation_tasks = [
             _generate_single_candidate(sc, design_summary, task, improvable_cases,
@@ -760,9 +984,9 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
             return
 
         # ════════════════════════════════════════════════════════════════════
-        # Step 3/3: 검증 및 보정
+        # Step 3/4: 검증 및 보정
         # ════════════════════════════════════════════════════════════════════
-        yield collector.log("info", "Step 3/3: 검증 및 보정 중...")
+        yield collector.log("info", "Step 3/4: 검증 및 보정 중...")
 
         final_candidates = []
         for cand in generated_candidates:
@@ -802,6 +1026,62 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
             return
 
         # ════════════════════════════════════════════════════════════════════
+        # Step 4/4: Mini-validation
+        # ════════════════════════════════════════════════════════════════════
+        mini_validation_summary = {"enabled": False, "validation_case_count": 0, "candidate_results": []}
+
+        validation_cases = await _select_validation_cases(run_id, improvable_cases, 3)
+        if validation_cases:
+            if sim_config:
+                sim_model_name = sim_config.get("model", "default")
+                yield collector.log("info", f"Step 4/4: Mini-validation 시작 — 생성 모델: {sim_model_name} ({len(validation_cases)}건 케이스, {len(final_candidates)}개 후보)")
+            else:
+                yield collector.log("warn", "Step 4/4: Mini-validation — 시뮬레이션 LLM 미설정, 기본 GPT로 시뮬레이션 수행")
+                yield collector.log("info", f"Mini-validation 시작 ({len(validation_cases)}건 케이스, {len(final_candidates)}개 후보)")
+
+            final_candidates = await _run_mini_validation(final_candidates, validation_cases, gpt_config=gpt_config, sim_config=sim_config)
+
+            # 결과 로깅
+            for cand in final_candidates:
+                mv = cand.get("mini_validation", {})
+                pr = mv.get("pass_rate", 0)
+                passed = mv.get("passed", 0)
+                total = mv.get("total", 0)
+                yield collector.log("info", f"후보 {cand['label']}: pass_rate={int(pr * 100)}% ({passed}/{total})")
+
+            # 필터링: pass_rate > 0인 것만 유지
+            passing = [c for c in final_candidates if c.get("mini_validation", {}).get("pass_rate", 0) > 0]
+
+            if passing:
+                filtered_count = len(final_candidates) - len(passing)
+                if filtered_count > 0:
+                    yield collector.log("warn", f"Mini-validation 필터링: {filtered_count}개 후보 제거 (pass_rate=0)")
+                final_candidates = passing
+            else:
+                # 모두 0이면 최선 1개 유지 + 경고
+                yield collector.log("warn", "모든 후보 pass_rate=0 — 최선 1개만 유지합니다 (GPT 설계 결과를 참고용으로 제공)")
+                final_candidates = final_candidates[:1]
+
+            mini_validation_summary = {
+                "enabled": True,
+                "validation_case_count": len(validation_cases),
+                "candidate_results": [
+                    {
+                        "label": c.get("label", ""),
+                        "pass_rate": c.get("mini_validation", {}).get("pass_rate", 0),
+                        "passed": c.get("mini_validation", {}).get("passed", 0),
+                        "total": c.get("mini_validation", {}).get("total", 0),
+                        "details": c.get("mini_validation", {}).get("details", []),
+                    }
+                    for c in final_candidates
+                ],
+            }
+
+            yield collector.log("ok", f"Mini-validation 완료 — {len(final_candidates)}개 후보 통과")
+        else:
+            yield collector.log("info", "Step 4/4: Mini-validation 스킵 (개선 가능한 오답 케이스 없음)")
+
+        # ════════════════════════════════════════════════════════════════════
         # DB 저장
         # ════════════════════════════════════════════════════════════════════
         for cand in final_candidates:
@@ -827,6 +1107,7 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
             "candidates": candidates_with_nodes,
             "prev_run_feedback": prev_run_feedback if prev_run_feedback else None,
             "user_guide": user_guide if user_guide else None,
+            "mini_validation_summary": mini_validation_summary,
         }
 
         async with db.execute(

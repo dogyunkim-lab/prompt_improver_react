@@ -63,3 +63,29 @@ async def get_task_gpt_config(run_id: int) -> dict:
         return cfg
     finally:
         await db.close()
+
+
+async def get_task_sim_config(run_id: int) -> dict:
+    """run_id에서 task의 시뮬레이션(생성) 모델 설정 조회. 없으면 빈 dict 반환."""
+    from database import get_db
+    db = await get_db()
+    try:
+        async with db.execute(
+            """SELECT t.sim_api_base, t.sim_api_key, t.sim_model
+               FROM runs r JOIN tasks t ON t.id = r.task_id
+               WHERE r.id=?""",
+            (run_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return {}
+        cfg = {}
+        if row["sim_api_base"]:
+            cfg["api_base"] = row["sim_api_base"]
+        if row["sim_api_key"]:
+            cfg["api_key"] = row["sim_api_key"]
+        if row["sim_model"]:
+            cfg["model"] = row["sim_model"]
+        return cfg
+    finally:
+        await db.close()

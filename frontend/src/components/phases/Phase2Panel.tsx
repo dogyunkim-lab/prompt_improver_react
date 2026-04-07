@@ -3,10 +3,19 @@ import { usePhaseStore } from '../../stores/phaseStore';
 import { useRunStore } from '../../stores/runStore';
 import { useSSEBuffered } from '../../hooks/useSSEBuffered';
 import { LogBox } from '../shared/LogBox';
-import { runPhase, cancelPhase, selectCandidate } from '../../api/phases';
+import { runPhase, cancelPhase, selectCandidate, saveCustomCandidate } from '../../api/phases';
 import { saveUserGuide } from '../../api/uploads';
 import { cn } from '../../utils/cn';
 import type { Candidate, CandidateNode } from '../../types';
+
+interface CustomNode {
+  label: string;
+  system_prompt: string;
+  user_prompt: string;
+  input_vars: string[];
+  output_var: string;
+  reasoning: boolean;
+}
 
 export const Phase2Panel: React.FC = () => {
   const selectedRunId = useRunStore((s) => s.selectedRunId);
@@ -36,6 +45,16 @@ export const Phase2Panel: React.FC = () => {
   const [userGuide, setUserGuide] = useState('');
   const [reasoning, setReasoning] = useState('high');
   const isRunning = phaseStatus[2] === 'running';
+
+  // 커스텀 에디터 state
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customNodeCount, setCustomNodeCount] = useState(1);
+  const [customNodes, setCustomNodes] = useState<CustomNode[]>([
+    { label: 'A', system_prompt: '', user_prompt: '', input_vars: ['stt'], output_var: 'generated', reasoning: false },
+    { label: 'B', system_prompt: '', user_prompt: '', input_vars: [], output_var: 'generated', reasoning: false },
+    { label: 'C', system_prompt: '', user_prompt: '', input_vars: [], output_var: 'generated', reasoning: false },
+  ]);
+  const [customSaving, setCustomSaving] = useState(false);
 
   // Load existing data
   useEffect(() => {
@@ -112,6 +131,78 @@ export const Phase2Panel: React.FC = () => {
     try { await cancelPhase(runId, 2); } catch { /* ignore */ }
   }, [runId]);
 
+  // 커스텀 에디터: AI 후보 복사
+  const handleCopyToEditor = useCallback((candidate: Candidate) => {
+    setCustomOpen(true);
+    const nodes = candidate.nodes?.length ? candidate.nodes : buildNodesFromCandidate(candidate);
+    setCustomNodeCount(nodes.length);
+    setCustomNodes((prev) => {
+      const next = [...prev];
+      nodes.forEach((n, i) => {
+        next[i] = {
+          label: n.label || ['A', 'B', 'C'][i],
+          system_prompt: n.system_prompt || '',
+          user_prompt: n.user_prompt || '',
+          input_vars: n.input_vars?.length ? [...n.input_vars] : ['stt'],
+          output_var: n.output_var || 'generated',
+          reasoning: !!n.reasoning,
+        };
+      });
+      return next;
+    });
+  }, []);
+
+  // 커스텀 에디터: 노드 수 변경
+  const handleCustomNodeCountChange = useCallback((count: number) => {
+    setCustomNodeCount(count);
+    setCustomNodes((prev) => {
+      const next = [...prev];
+      // 마지막 노드의 output_var를 'generated'로 강제
+      for (let i = 0; i < 3; i++) {
+        if (i === count - 1) {
+          next[i] = { ...next[i], output_var: 'generated' };
+        } else if (i === 0 && count >= 2 && next[i].output_var === 'generated') {
+          next[i] = { ...next[i], output_var: 'analysis' };
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  // 커스텀 에디터: 노드 필드 업데이트
+  const updateCustomNode = useCallback((idx: number, field: keyof CustomNode, value: unknown) => {
+    setCustomNodes((prev) => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], [field]: value };
+      return next;
+    });
+  }, []);
+
+  // 커스텀 에디터: 저장
+  const handleSaveCustom = useCallback(async () => {
+    if (!runId) return;
+    // 첫 노드 input_vars에 stt 필수
+    const firstNode = customNodes[0];
+    if (!firstNode.input_vars.includes('stt')) {
+      alert('첫 번째 노드의 입력 변수에 "stt"가 필수입니다.');
+      return;
+    }
+    setCustomSaving(true);
+    try {
+      const result = await saveCustomCandidate(runId, {
+        node_count: customNodeCount,
+        nodes: customNodes.slice(0, customNodeCount),
+      });
+      setSelectedCandidateId(result.candidate_id);
+      const data = await loadRunData(runId);
+      updatePhaseTabsFromRunData(data.phases || {});
+    } catch (e) {
+      alert('저장 오류: ' + (e as Error).message);
+    } finally {
+      setCustomSaving(false);
+    }
+  }, [runId, customNodeCount, customNodes, setSelectedCandidateId, loadRunData, updatePhaseTabsFromRunData]);
+
   const onSelectCandidate = useCallback(async (candidateId: number) => {
     if (!runId) return;
     try {
@@ -159,8 +250,62 @@ export const Phase2Panel: React.FC = () => {
               candidate={cand}
               isSelected={selectedCandidateId === cand.id}
               onSelect={() => onSelectCandidate(cand.id)}
+              onCopy={() => handleCopyToEditor(cand)}
             />
           ))
+        )}
+      </div>
+
+      {/* 커스텀 후보 에디터 */}
+      <div className="bg-warm-card rounded-[10px] mb-5 shadow-[0_1px_4px_rgba(0,0,0,0.07)] overflow-hidden">
+        <button
+          className="w-full flex items-center justify-between py-3 px-4 text-[13px] font-semibold text-warm-text hover:bg-warm-hover transition-colors"
+          onClick={() => setCustomOpen((v) => !v)}
+        >
+          <span>커스텀 후보 작성</span>
+          <span className={cn('transition-transform text-xs', customOpen && 'rotate-180')}>▼</span>
+        </button>
+
+        {customOpen && (
+          <div className="px-4 pb-4 border-t border-warm-table-border">
+            {/* 노드 수 선택 */}
+            <div className="flex items-center gap-2 mt-3 mb-4">
+              <span className="text-xs text-[#888]">노드 수:</span>
+              {[1, 2, 3].map((n) => (
+                <button
+                  key={n}
+                  className={cn(
+                    'py-1 px-3 rounded text-xs font-semibold border',
+                    customNodeCount === n
+                      ? 'bg-ctp-mauve text-ctp-base border-ctp-mauve'
+                      : 'bg-warm-table-bg text-[#666] border-warm-border hover:border-[#999]',
+                  )}
+                  onClick={() => handleCustomNodeCountChange(n)}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+
+            {/* 각 노드 에디터 */}
+            {customNodes.slice(0, customNodeCount).map((node, idx) => (
+              <CustomNodeEditor
+                key={node.label}
+                node={node}
+                isLast={idx === customNodeCount - 1}
+                onChange={(field, value) => updateCustomNode(idx, field, value)}
+              />
+            ))}
+
+            {/* 저장 버튼 */}
+            <button
+              className="mt-3 py-2 px-5 bg-ctp-green text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"
+              onClick={handleSaveCustom}
+              disabled={customSaving}
+            >
+              {customSaving ? '저장 중...' : '저장 및 선택'}
+            </button>
+          </div>
         )}
       </div>
 
@@ -204,7 +349,8 @@ const CandidateCard: React.FC<{
   candidate: Candidate;
   isSelected: boolean;
   onSelect: () => void;
-}> = React.memo(({ candidate, isSelected, onSelect }) => {
+  onCopy?: () => void;
+}> = React.memo(({ candidate, isSelected, onSelect, onCopy }) => {
   const [activeNode, setActiveNode] = useState(0);
   const [promptTab, setPromptTab] = useState<'system' | 'user'>('system');
 
@@ -265,18 +411,136 @@ const CandidateCard: React.FC<{
         </>
       )}
 
-      <button
-        className={cn(
-          'mt-2.5 py-1.5 px-3.5 rounded-md font-semibold text-xs w-full hover:opacity-85',
-          isSelected ? 'bg-ctp-green text-ctp-base' : 'bg-ctp-mauve text-ctp-base',
+      <div className="flex gap-2 mt-2.5">
+        <button
+          className={cn(
+            'py-1.5 px-3.5 rounded-md font-semibold text-xs flex-1 hover:opacity-85',
+            isSelected ? 'bg-ctp-green text-ctp-base' : 'bg-ctp-mauve text-ctp-base',
+          )}
+          onClick={onSelect}
+        >{isSelected ? '✓ 선택됨' : '후보 선택'}</button>
+        {onCopy && (
+          <button
+            className="py-1.5 px-3 rounded-md font-semibold text-xs bg-warm-table-bg text-[#666] border border-warm-border hover:border-[#999] hover:text-[#333]"
+            onClick={onCopy}
+            title="커스텀 에디터에 복사"
+          >복사</button>
         )}
-        onClick={onSelect}
-      >{isSelected ? '✓ 선택됨' : '후보 선택'}</button>
+      </div>
     </div>
   );
 });
 
 CandidateCard.displayName = 'CandidateCard';
+
+/* ── Custom Node Editor ── */
+const CustomNodeEditor: React.FC<{
+  node: CustomNode;
+  isLast: boolean;
+  onChange: (field: keyof CustomNode, value: unknown) => void;
+}> = React.memo(({ node, isLast, onChange }) => {
+  const [newVar, setNewVar] = useState('');
+
+  const addInputVar = () => {
+    const v = newVar.trim();
+    if (v && !node.input_vars.includes(v)) {
+      onChange('input_vars', [...node.input_vars, v]);
+    }
+    setNewVar('');
+  };
+
+  const removeInputVar = (v: string) => {
+    onChange('input_vars', node.input_vars.filter((x) => x !== v));
+  };
+
+  return (
+    <div className="mb-4 pb-4 border-b border-[#333] last:border-b-0 last:pb-0 last:mb-0">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-xs font-bold text-ctp-mauve">Node {node.label}</span>
+        <label className="flex items-center gap-1 ml-auto text-[11px] text-[#888] cursor-pointer">
+          <input
+            type="checkbox"
+            checked={node.reasoning}
+            onChange={(e) => onChange('reasoning', e.target.checked)}
+            className="w-3.5 h-3.5 accent-ctp-teal"
+          />
+          Reasoning
+        </label>
+      </div>
+
+      <div className="mb-2">
+        <label className="text-[11px] text-[#888] block mb-0.5">System Prompt</label>
+        <textarea
+          className="w-full bg-[#1a1a1a] text-[#ccc] border border-[#444] rounded-lg py-2 px-2.5 text-xs font-mono resize-y leading-relaxed focus:border-ctp-mauve focus:outline-none"
+          rows={4}
+          value={node.system_prompt}
+          onChange={(e) => onChange('system_prompt', e.target.value)}
+          placeholder="시스템 프롬프트를 입력하세요..."
+        />
+      </div>
+
+      <div className="mb-2">
+        <label className="text-[11px] text-[#888] block mb-0.5">User Prompt</label>
+        <textarea
+          className="w-full bg-[#1a1a1a] text-[#ccc] border border-[#444] rounded-lg py-2 px-2.5 text-xs font-mono resize-y leading-relaxed focus:border-ctp-mauve focus:outline-none"
+          rows={3}
+          value={node.user_prompt}
+          onChange={(e) => onChange('user_prompt', e.target.value)}
+          placeholder="유저 프롬프트를 입력하세요... (변수: {stt}, {reference} 등)"
+        />
+      </div>
+
+      <div className="flex gap-4 flex-wrap">
+        <div className="flex-1 min-w-[140px]">
+          <label className="text-[11px] text-[#888] block mb-0.5">Input Variables</label>
+          <div className="flex flex-wrap gap-1 mb-1">
+            {node.input_vars.map((v) => (
+              <span
+                key={v}
+                className="inline-flex items-center gap-0.5 bg-[#2a2a2a] text-[#aaa] py-0.5 px-2 rounded text-[11px]"
+              >
+                {v}
+                <button
+                  className="text-[#666] hover:text-ctp-red ml-0.5 text-[10px]"
+                  onClick={() => removeInputVar(v)}
+                >&times;</button>
+              </span>
+            ))}
+          </div>
+          <div className="flex gap-1">
+            <input
+              type="text"
+              className="flex-1 bg-[#1a1a1a] text-[#ccc] border border-[#444] rounded py-1 px-2 text-[11px] focus:border-ctp-mauve focus:outline-none"
+              value={newVar}
+              onChange={(e) => setNewVar(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && addInputVar()}
+              placeholder="변수명"
+            />
+            <button
+              className="py-1 px-2 bg-[#333] text-[#aaa] rounded text-[11px] hover:bg-[#444]"
+              onClick={addInputVar}
+            >+ 추가</button>
+          </div>
+        </div>
+
+        <div className="min-w-[120px]">
+          <label className="text-[11px] text-[#888] block mb-0.5">Output Variable</label>
+          <input
+            type="text"
+            className="w-full bg-[#1a1a1a] text-[#ccc] border border-[#444] rounded py-1 px-2 text-xs focus:border-ctp-mauve focus:outline-none disabled:opacity-50"
+            value={node.output_var}
+            onChange={(e) => onChange('output_var', e.target.value)}
+            disabled={isLast}
+            title={isLast ? '마지막 노드의 출력 변수는 항상 "generated"입니다.' : undefined}
+          />
+          {isLast && <span className="text-[10px] text-[#666]">마지막 노드: generated 고정</span>}
+        </div>
+      </div>
+    </div>
+  );
+});
+
+CustomNodeEditor.displayName = 'CustomNodeEditor';
 
 function buildNodesFromCandidate(c: Candidate): CandidateNode[] {
   const nodes: CandidateNode[] = [];

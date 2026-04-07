@@ -12,7 +12,11 @@ export const NewTaskModal: React.FC = () => {
   const [gptBase, setGptBase] = useState('');
   const [gptKey, setGptKey] = useState('');
   const [gptModel, setGptModel] = useState('');
+  const [simBase, setSimBase] = useState('');
+  const [simKey, setSimKey] = useState('');
+  const [simModel, setSimModel] = useState('');
   const [showLLM, setShowLLM] = useState(false);
+  const [showSimLLM, setShowSimLLM] = useState(false);
 
   const onSubmit = useCallback(async () => {
     if (!name.trim()) return;
@@ -25,6 +29,9 @@ export const NewTaskModal: React.FC = () => {
         gpt_api_base: gptBase.trim() || undefined,
         gpt_api_key: gptKey.trim() || undefined,
         gpt_model: gptModel.trim() || undefined,
+        sim_api_base: simBase.trim() || undefined,
+        sim_api_key: simKey.trim() || undefined,
+        sim_model: simModel.trim() || undefined,
       });
       setSelectedTaskId(task.id);
       setName('');
@@ -33,13 +40,16 @@ export const NewTaskModal: React.FC = () => {
       setGptBase('');
       setGptKey('');
       setGptModel('');
+      setSimBase('');
+      setSimKey('');
+      setSimModel('');
       closeModal();
     } catch (e) {
       alert('생성 오류: ' + (e as Error).message);
     } finally {
       setSubmitting(false);
     }
-  }, [name, desc, genType, gptBase, gptKey, gptModel, createTask, setSelectedTaskId, closeModal, setSubmitting]);
+  }, [name, desc, genType, gptBase, gptKey, gptModel, simBase, simKey, simModel, createTask, setSelectedTaskId, closeModal, setSubmitting]);
 
   return (
     <Modal
@@ -123,6 +133,46 @@ export const NewTaskModal: React.FC = () => {
               placeholder="기본값 사용 시 비워두세요"
               value={gptModel}
               onChange={(e) => setGptModel(e.target.value)}
+            />
+          </div>
+        </div>
+      )}
+      <div className="mb-1">
+        <button
+          type="button"
+          className="text-xs text-ctp-teal font-semibold hover:underline"
+          onClick={() => setShowSimLLM(!showSimLLM)}
+        >{showSimLLM ? '▾ 시뮬레이션 LLM 설정 접기' : '▸ 시뮬레이션 LLM 설정 (Mini-validation 생성 모델)'}</button>
+      </div>
+      {showSimLLM && (
+        <div className="pl-2 border-l-2 border-ctp-teal/30 mb-3.5 space-y-2.5">
+          <p className="text-[11px] text-[#888]">Mini-validation에서 워크플로우 시뮬레이션에 사용할 생성 모델 (예: qwen3.5-35B-A3B)</p>
+          <div>
+            <label className="block text-xs text-[#666] mb-1 font-semibold">API Base URL</label>
+            <input
+              className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-teal focus:outline-none"
+              placeholder="기본값 사용 시 비워두세요"
+              value={simBase}
+              onChange={(e) => setSimBase(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-[#666] mb-1 font-semibold">API Key</label>
+            <input
+              type="password"
+              className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-teal focus:outline-none"
+              placeholder="기본값 사용 시 비워두세요"
+              value={simKey}
+              onChange={(e) => setSimKey(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-[#666] mb-1 font-semibold">모델명</label>
+            <input
+              className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-teal focus:outline-none"
+              placeholder="예: qwen3.5-35B-A3B"
+              value={simModel}
+              onChange={(e) => setSimModel(e.target.value)}
             />
           </div>
         </div>

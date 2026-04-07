@@ -7,6 +7,9 @@ export interface Task {
   gpt_api_base?: string;
   gpt_api_key?: string;
   gpt_model?: string;
+  sim_api_base?: string;
+  sim_api_key?: string;
+  sim_model?: string;
   created_at?: string;
   runs: Run[];
 }

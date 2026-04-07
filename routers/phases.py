@@ -224,6 +224,80 @@ async def select_candidate(run_id: int, body: SelectCandidateBody):
         await db.close()
 
 
+# ── 커스텀 후보 저장 ─────────────────────────────────────────────────────────
+
+@router.post("/api/runs/{run_id}/custom-candidate")
+async def save_custom_candidate(run_id: int, body: dict):
+    """사용자가 직접 작성한 커스텀 후보를 저장하고 자동 선택한다."""
+    db = await get_db()
+    try:
+        async with db.execute("SELECT id FROM runs WHERE id=?", (run_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Run not found")
+
+        nodes = body.get("nodes", [])
+        node_count = body.get("node_count", len(nodes))
+        if not nodes or node_count < 1 or node_count > 3:
+            raise HTTPException(status_code=400, detail="노드는 1~3개여야 합니다.")
+
+        # 기존 custom 후보 삭제 (run당 1개만)
+        await db.execute(
+            "DELETE FROM prompt_candidates WHERE run_id=? AND mode='custom'",
+            (run_id,),
+        )
+
+        # flat 컬럼 매핑
+        fields: dict[str, dict] = {"a": {}, "b": {}, "c": {}}
+        for n in nodes:
+            lbl = n.get("label", "").lower()
+            if lbl in fields:
+                sys_p = n.get("system_prompt", "")
+                usr_p = n.get("user_prompt", "")
+                combined = (sys_p + "\n\n" + usr_p).strip()
+                fields[lbl] = {
+                    "prompt": combined,
+                    "system_prompt": sys_p,
+                    "user_prompt": usr_p,
+                    "input_vars": json.dumps(n.get("input_vars", []), ensure_ascii=False),
+                    "output_var": n.get("output_var", ""),
+                    "reasoning": 1 if n.get("reasoning") else 0,
+                }
+
+        async with db.execute(
+            """INSERT INTO prompt_candidates
+               (run_id, candidate_label, mode, workflow_spec, node_count,
+                node_a_prompt, node_b_prompt, node_c_prompt,
+                node_a_system_prompt, node_a_user_prompt, node_a_input_vars, node_a_output_var,
+                node_b_system_prompt, node_b_user_prompt, node_b_input_vars, node_b_output_var,
+                node_c_system_prompt, node_c_user_prompt, node_c_input_vars, node_c_output_var,
+                node_a_reasoning, node_b_reasoning, node_c_reasoning, design_rationale)
+               VALUES (?,?,?,?,?, ?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?, ?)""",
+            (
+                run_id, "custom", "custom", "", node_count,
+                fields["a"].get("prompt"), fields["b"].get("prompt"), fields["c"].get("prompt"),
+                fields["a"].get("system_prompt"), fields["a"].get("user_prompt"),
+                fields["a"].get("input_vars"), fields["a"].get("output_var"),
+                fields["b"].get("system_prompt"), fields["b"].get("user_prompt"),
+                fields["b"].get("input_vars"), fields["b"].get("output_var"),
+                fields["c"].get("system_prompt"), fields["c"].get("user_prompt"),
+                fields["c"].get("input_vars"), fields["c"].get("output_var"),
+                fields["a"].get("reasoning", 0), fields["b"].get("reasoning", 0),
+                fields["c"].get("reasoning", 0),
+                "사용자 커스텀 후보",
+            ),
+        ) as cursor:
+            new_id = cursor.lastrowid
+
+        # 자동 선택 + dify 연결 리셋
+        await db.execute("UPDATE runs SET selected_candidate_id=? WHERE id=?", (new_id, run_id))
+        await db.execute("DELETE FROM dify_connections WHERE run_id=?", (run_id,))
+        await db.commit()
+
+        return {"ok": True, "candidate_id": new_id}
+    finally:
+        await db.close()
+
+
 # ── Phase 3 ──────────────────────────────────────────────────────────────────
 
 class DifyConnectBody(BaseModel):
