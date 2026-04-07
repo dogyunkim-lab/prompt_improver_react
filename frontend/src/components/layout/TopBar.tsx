@@ -27,7 +27,7 @@ export const TopBar: React.FC = () => {
           <button
             className="py-[5px] px-[9px] bg-transparent text-warm-muted rounded-md text-[13px] border border-warm-border hover:bg-black/5"
             onClick={() => task && openModal('editTask', task)}
-            title="Task 편집"
+            title="실험 설정 편집"
           >✎</button>
         </div>
         <p className="text-xs text-warm-muted mt-0.5">{metaParts.join(' · ')}</p>
@@ -36,6 +36,7 @@ export const TopBar: React.FC = () => {
         <button
           className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 transition-opacity"
           onClick={() => openModal('newRun')}
+          title="새 Run을 생성합니다. Zero(처음부터) 또는 Continue(이전 Run 이어서) 모드를 선택할 수 있습니다."
         >
           + 새 Run
         </button>

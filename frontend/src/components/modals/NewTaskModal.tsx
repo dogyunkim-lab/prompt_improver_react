@@ -78,12 +78,13 @@ export const NewTaskModal: React.FC = () => {
             className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"
             onClick={onSubmit}
             disabled={!name.trim() || submitting}
+            title="새 실험을 생성합니다"
           >만들기</button>
         </>
       }
     >
       <div className="mb-3.5">
-        <label className="block text-xs text-[#666] mb-1 font-semibold">Task명 *</label>
+        <label className="block text-xs text-[#666] mb-1 font-semibold" title="실험을 구분하는 이름입니다">Task명 *</label>
         <input
           className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-mauve focus:outline-none"
           placeholder="실험 이름 입력"
@@ -93,7 +94,7 @@ export const NewTaskModal: React.FC = () => {
         />
       </div>
       <div className="mb-3.5">
-        <label className="block text-xs text-[#666] mb-1 font-semibold">설명</label>
+        <label className="block text-xs text-[#666] mb-1 font-semibold" title="실험 목적이나 메모를 입력합니다">설명</label>
         <input
           className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-mauve focus:outline-none"
           placeholder="실험에 대한 설명"
@@ -102,7 +103,7 @@ export const NewTaskModal: React.FC = () => {
         />
       </div>
       <div className="mb-3.5">
-        <label className="block text-xs text-[#666] mb-1 font-semibold">요약 유형</label>
+        <label className="block text-xs text-[#666] mb-1 font-semibold" title="이 실험에서 다루는 요약 종류 (예: 민원내용). GPT가 분석 시 참고합니다.">요약 유형</label>
         <input
           className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-mauve focus:outline-none"
           placeholder="예: 불편사항 요약"
@@ -115,6 +116,7 @@ export const NewTaskModal: React.FC = () => {
           type="button"
           className="text-xs text-ctp-mauve font-semibold hover:underline"
           onClick={() => setShowLLM(!showLLM)}
+          title="GPT 분석에 사용할 모델을 지정합니다. 비워두면 서버 기본값을 사용합니다."
         >{showLLM ? '▾ LLM 설정 접기' : '▸ LLM 설정 (선택)'}</button>
       </div>
       {showLLM && (
@@ -154,6 +156,7 @@ export const NewTaskModal: React.FC = () => {
           type="button"
           className="text-xs text-ctp-teal font-semibold hover:underline"
           onClick={() => setShowSimLLM(!showSimLLM)}
+          title="Phase 2 Mini-validation에서 워크플로우 시뮬레이션에 사용할 생성 모델입니다. 실제 Dify 워크플로우 모델과 동일하게 설정하세요."
         >{showSimLLM ? '▾ 시뮬레이션 LLM 설정 접기' : '▸ 시뮬레이션 LLM 설정 (Mini-validation 생성 모델)'}</button>
       </div>
       {showSimLLM && (
@@ -194,6 +197,7 @@ export const NewTaskModal: React.FC = () => {
           type="button"
           className="text-xs text-ctp-peach font-semibold hover:underline"
           onClick={() => setShowAnchor(!showAnchor)}
+          title="Phase 2에서 GPT가 프롬프트를 설계할 때 항상 참조하는 고정 가이드입니다"
         >{showAnchor ? '▾ 앵커 가이드 접기' : '▸ 앵커 가이드 (Phase 2 전략 고정 가이드)'}</button>
       </div>
       {showAnchor && (

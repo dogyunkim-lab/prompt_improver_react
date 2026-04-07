@@ -98,24 +98,24 @@ export const Phase4Panel: React.FC = () => {
         const over = ps.p4Cases.filter((c) => c.evaluation === '과답').length;
         const wrong = ps.p4Cases.filter((c) => c.evaluation === '오답').length;
         return [
-          { label: '정답+과답%', value: fmtPct(((correct + over) / total) * 100), sub: '정답 + 과답', variant: 'good' as const },
-          { label: '정답%', value: fmtPct((correct / total) * 100), sub: '정확한 답변', variant: 'default' as const },
-          { label: '과답%', value: fmtPct((over / total) * 100), sub: '과도한 답변', variant: 'warn' as const },
-          { label: '오답%', value: fmtPct((wrong / total) * 100), sub: '틀린 답변', variant: 'bad' as const },
+          { label: '정답+과답%', value: fmtPct(((correct + over) / total) * 100), sub: '정답 + 과답', variant: 'good' as const, title: '핵심 지표. 이 비율을 95% 이상으로 올리는 것이 목표입니다.' },
+          { label: '정답%', value: fmtPct((correct / total) * 100), sub: '정확한 답변', variant: 'default' as const, title: 'Reference와 동일한 핵심 내용을 요약한 비율' },
+          { label: '과답%', value: fmtPct((over / total) * 100), sub: '과도한 답변', variant: 'warn' as const, title: '맞지만 불필요한 내용이 추가된 비율' },
+          { label: '오답%', value: fmtPct((wrong / total) * 100), sub: '틀린 답변', variant: 'bad' as const, title: '핵심 내용이 누락되거나 틀린 비율' },
         ];
       }
       return [
-        { label: '정답+과답%', value: '—', sub: '정답 + 과답', variant: 'good' as const },
-        { label: '정답%', value: '—', sub: '정확한 답변', variant: 'default' as const },
-        { label: '과답%', value: '—', sub: '과도한 답변', variant: 'warn' as const },
-        { label: '오답%', value: '—', sub: '틀린 답변', variant: 'bad' as const },
+        { label: '정답+과답%', value: '—', sub: '정답 + 과답', variant: 'good' as const, title: '핵심 지표. 이 비율을 95% 이상으로 올리는 것이 목표입니다.' },
+        { label: '정답%', value: '—', sub: '정확한 답변', variant: 'default' as const, title: 'Reference와 동일한 핵심 내용을 요약한 비율' },
+        { label: '과답%', value: '—', sub: '과도한 답변', variant: 'warn' as const, title: '맞지만 불필요한 내용이 추가된 비율' },
+        { label: '오답%', value: '—', sub: '틀린 답변', variant: 'bad' as const, title: '핵심 내용이 누락되거나 틀린 비율' },
       ];
     }
     return [
-      { label: '정답+과답%', value: fmtPct(s.correct_plus_over), sub: '정답 + 과답', variant: 'good' as const },
-      { label: '정답%', value: fmtPct(s.correct), sub: '정확한 답변', variant: 'default' as const },
-      { label: '과답%', value: fmtPct(s.over), sub: '과도한 답변', variant: 'warn' as const },
-      { label: '오답%', value: fmtPct(s.wrong), sub: '틀린 답변', variant: 'bad' as const },
+      { label: '정답+과답%', value: fmtPct(s.correct_plus_over), sub: '정답 + 과답', variant: 'good' as const, title: '핵심 지표. 이 비율을 95% 이상으로 올리는 것이 목표입니다.' },
+      { label: '정답%', value: fmtPct(s.correct), sub: '정확한 답변', variant: 'default' as const, title: 'Reference와 동일한 핵심 내용을 요약한 비율' },
+      { label: '과답%', value: fmtPct(s.over), sub: '과도한 답변', variant: 'warn' as const, title: '맞지만 불필요한 내용이 추가된 비율' },
+      { label: '오답%', value: fmtPct(s.wrong), sub: '틀린 답변', variant: 'bad' as const, title: '핵심 내용이 누락되거나 틀린 비율' },
     ];
   }, [ps.p4Scores, ps.p4Cases]);
 
@@ -150,9 +150,9 @@ export const Phase4Panel: React.FC = () => {
         <h4 className="text-[13px] text-[#555] mb-3">케이스 목록</h4>
         <div className="flex gap-1.5 mb-2">
           <button className="py-1 px-2.5 text-xs border border-[#555] bg-[#2a2a2a] text-[#ccc] rounded cursor-pointer hover:bg-[#3a3a3a]"
-            onClick={() => downloadJSON(ps.p4Cases, `phase4_cases_run${runData?.run_number || ''}.json`)}>JSON ⬇</button>
+            onClick={() => downloadJSON(ps.p4Cases, `phase4_cases_run${runData?.run_number || ''}.json`)} title="판정 결과를 파일로 다운로드합니다">JSON ⬇</button>
           <button className="py-1 px-2.5 text-xs border border-[#555] bg-[#2a2a2a] text-[#ccc] rounded cursor-pointer hover:bg-[#3a3a3a]"
-            onClick={() => downloadXLSX(ps.p4Cases, `phase4_cases_run${runData?.run_number || ''}.xlsx`)}>XLSX ⬇</button>
+            onClick={() => downloadXLSX(ps.p4Cases, `phase4_cases_run${runData?.run_number || ''}.xlsx`)} title="판정 결과를 파일로 다운로드합니다">XLSX ⬇</button>
         </div>
         <DataTable
           columns={P4_COLUMNS}
@@ -175,9 +175,10 @@ export const Phase4Panel: React.FC = () => {
           className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"
           onClick={onRun}
           disabled={isRunning}
+          title="Phase 3에서 생성된 요약을 GPT Judge가 판정합니다. 최대 5건씩 병렬 처리됩니다."
         >Phase 4 실행</button>
         {isRunning && (
-          <button className="py-2 px-3.5 bg-ctp-red text-ctp-base rounded-md font-semibold text-xs hover:opacity-85" onClick={onCancel}>
+          <button className="py-2 px-3.5 bg-ctp-red text-ctp-base rounded-md font-semibold text-xs hover:opacity-85" onClick={onCancel} title="현재 실행을 중단합니다">
             ■ 중단
           </button>
         )}

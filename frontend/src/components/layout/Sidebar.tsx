@@ -93,6 +93,7 @@ export const Sidebar: React.FC = () => {
         type="text"
         className="mx-3 mt-2 mb-1 py-1.5 px-2.5 bg-ctp-surface0 text-ctp-text border border-ctp-surface1 rounded-md text-xs placeholder:text-ctp-overlay0 focus:border-ctp-mauve focus:outline-none"
         placeholder="실험 검색..."
+        title="실험 이름으로 검색합니다"
         value={taskFilter}
         onChange={(e) => setTaskFilter(e.target.value)}
       />
@@ -101,6 +102,7 @@ export const Sidebar: React.FC = () => {
       <button
         className="mx-3 mt-2 mb-2 py-2 px-3 bg-ctp-surface0 text-ctp-mauve rounded-md text-xs font-semibold border border-ctp-surface1 hover:bg-ctp-surface1 transition-colors"
         onClick={() => openModal('newTask')}
+        title="새 Task(실험)를 생성합니다. 요약 유형, LLM 설정, 앵커 가이드 등을 지정할 수 있습니다."
       >
         + 새 실험 만들기
       </button>
@@ -138,12 +140,12 @@ export const Sidebar: React.FC = () => {
                   <button
                     className="hidden group-hover:flex items-center justify-center w-4 h-4 rounded bg-transparent text-ctp-overlay0 text-xs hover:bg-ctp-mauve/20 hover:text-ctp-mauve"
                     onClick={(e) => { e.stopPropagation(); openModal('editTask', task); }}
-                    title="편집"
+                    title="실험 설정 편집 (LLM, 앵커 가이드 등)"
                   >✎</button>
                   <button
                     className="hidden group-hover:flex items-center justify-center w-4 h-4 rounded bg-transparent text-ctp-overlay0 text-[13px] hover:bg-ctp-red/20 hover:text-ctp-red"
                     onClick={(e) => { e.stopPropagation(); onDeleteTask(task); }}
-                    title="삭제"
+                    title="이 실험과 모든 Run을 삭제합니다"
                   >✕</button>
                 </div>
 
@@ -190,13 +192,13 @@ export const Sidebar: React.FC = () => {
                             )}
                           </div>
                           <div className="flex items-center gap-1">
-                            <span className={cn('text-[10px] font-bold py-0.5 px-1.5 rounded-[10px]', badge.cls)}>
+                            <span className={cn('text-[10px] font-bold py-0.5 px-1.5 rounded-[10px]', badge.cls)} title={badge.text === '진행중' ? '현재 실행 중입니다' : badge.text === '실패' ? '실행 중 오류가 발생했습니다' : badge.text === '대기' ? '아직 실행되지 않았습니다' : `최종 점수: ${badge.text}`}>
                               {badge.text}
                             </span>
                             <button
                               className="hidden group-hover/run:flex items-center justify-center w-3.5 h-3.5 rounded bg-transparent text-ctp-overlay0 text-[11px] hover:bg-ctp-red/20 hover:text-ctp-red ml-1"
                               onClick={(e) => { e.stopPropagation(); onDeleteRun(task.id, run); }}
-                              title="삭제"
+                              title="이 Run을 삭제합니다"
                             >✕</button>
                           </div>
                         </div>

@@ -123,6 +123,28 @@ export interface CandidateNode {
   reasoning: boolean;
 }
 
+/* ── Mini-Validation ── */
+export interface MiniValidationDetail {
+  case_id: string;
+  evaluation: string;
+  generated_preview?: string;
+  error?: string;
+}
+
+export interface MiniValidationCandidateResult {
+  label: string;
+  pass_rate: number;
+  passed: number;
+  total: number;
+  details: MiniValidationDetail[];
+}
+
+export interface MiniValidationSummary {
+  enabled: boolean;
+  validation_case_count: number;
+  candidate_results: MiniValidationCandidateResult[];
+}
+
 /* ── Dify ── */
 export interface DifyConnection {
   id: number;

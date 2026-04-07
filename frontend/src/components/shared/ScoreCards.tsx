@@ -6,6 +6,7 @@ interface ScoreCardItem {
   value: string;
   sub: string;
   variant?: 'good' | 'warn' | 'bad' | 'default';
+  title?: string;
 }
 
 interface ScoreCardsProps {
@@ -25,6 +26,7 @@ export const ScoreCards: React.FC<ScoreCardsProps> = React.memo(({ items }) => (
       <div
         key={item.label}
         className="bg-warm-card rounded-[10px] py-4 px-5 min-w-[140px] flex-1 shadow-[0_1px_4px_rgba(0,0,0,0.07)]"
+        title={item.title}
       >
         <div className="text-[11px] text-warm-muted mb-1.5">{item.label}</div>
         <div className={cn('text-[28px] font-bold', variantColor[item.variant || 'default'])}>

@@ -61,6 +61,7 @@ export const NewRunModal: React.FC = () => {
             className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"
             onClick={onSubmit}
             disabled={submitting}
+            title="새 Run을 생성하고 Phase 1 화면으로 이동합니다"
           >생성</button>
         </>
       }
@@ -73,7 +74,7 @@ export const NewRunModal: React.FC = () => {
         <div className="mb-4">
           <label className="block text-xs text-[#666] mb-2 font-semibold">시작 모드</label>
           <div className="flex flex-col gap-2">
-            <label className="flex items-center gap-2 text-[13px] text-[#444] cursor-pointer">
+            <label className="flex items-center gap-2 text-[13px] text-[#444] cursor-pointer" title="새 Judge JSON을 업로드하고 처음부터 분석합니다">
               <input
                 type="radio"
                 name="startMode"
@@ -83,7 +84,7 @@ export const NewRunModal: React.FC = () => {
               />
               처음부터 (Zero)
             </label>
-            <label className="flex items-center gap-2 text-[13px] text-[#444] cursor-pointer">
+            <label className="flex items-center gap-2 text-[13px] text-[#444] cursor-pointer" title="이전 Run의 Phase 4 판정 결과를 자동으로 사용합니다. Phase 6 피드백도 자동 주입됩니다.">
               <input
                 type="radio"
                 name="startMode"
@@ -101,7 +102,7 @@ export const NewRunModal: React.FC = () => {
 
           {startMode === 'continue' && (
             <div className="mt-3">
-              <label className="block text-xs text-[#666] mb-1 font-semibold">기반 Run 선택</label>
+              <label className="block text-xs text-[#666] mb-1 font-semibold" title="어떤 Run의 결과를 기반으로 이어서 실험할지 선택합니다">기반 Run 선택</label>
               <select
                 className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px]"
                 value={baseRunId || ''}

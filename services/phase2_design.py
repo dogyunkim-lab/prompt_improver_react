@@ -1099,6 +1099,8 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
 
         validation_cases = await _select_validation_cases(run_id, improvable_cases, 3)
         if validation_cases:
+            case_ids_str = ", ".join(c.get("case_id", "") for c in validation_cases)
+            yield collector.log("info", f"검증 케이스 선별: [{case_ids_str}]")
             if sim_config:
                 sim_model_name = sim_config.get("model", "default")
                 yield collector.log("info", f"Step 4/4: Mini-validation 시작 — 생성 모델: {sim_model_name} ({len(validation_cases)}건 케이스, {len(final_candidates)}개 후보)")
@@ -1115,6 +1117,11 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                 passed = mv.get("passed", 0)
                 total = mv.get("total", 0)
                 yield collector.log("info", f"후보 {cand['label']}: pass_rate={int(pr * 100)}% ({passed}/{total})")
+                for d in mv.get("details", []):
+                    case_id = d.get("case_id", "")
+                    evaluation = d.get("evaluation", "평가실패")
+                    preview = (d.get("generated_preview", "") or "")[:60]
+                    yield collector.log("info", f"  └ 케이스 {case_id}: {evaluation} — \"{preview}...\"")
 
             # 필터링: pass_rate > 0인 것만 유지
             passing = [c for c in final_candidates if c.get("mini_validation", {}).get("pass_rate", 0) > 0]
@@ -1190,6 +1197,11 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                         p = mv.get("passed", 0)
                         t = mv.get("total", 0)
                         yield collector.log("info", f"재시도 후보 {cand['label']}: pass_rate={int(pr * 100)}% ({p}/{t})")
+                        for d in mv.get("details", []):
+                            case_id = d.get("case_id", "")
+                            evaluation = d.get("evaluation", "평가실패")
+                            preview = (d.get("generated_preview", "") or "")[:60]
+                            yield collector.log("info", f"  └ 케이스 {case_id}: {evaluation} — \"{preview}...\"")
 
                     retry_passing = [c for c in validated_retry if c.get("mini_validation", {}).get("pass_rate", 0) > 0]
 

@@ -98,25 +98,26 @@ export const Phase5Panel: React.FC = () => {
           data.goal_achieved
             ? 'bg-[#dcfce7] text-[#166534] border-[#bbf7d0]'
             : 'bg-[#fef9c3] text-[#854d0e] border-[#fde68a]',
-        )}>
+        )}
+        title={data.goal_achieved ? '목표 정답+과답 95%를 달성했습니다!' : `목표 정답+과답 95%까지 ${data.gap_to_goal?.toFixed(1) ?? '—'}%p 남았습니다`}>
           {data.goal_achieved ? '🎉 목표 달성!' : `목표까지 ${data.gap_to_goal?.toFixed(1) ?? '—'}%p 부족`}
         </div>
       )}
 
       {/* Trend chart */}
       <div className="bg-warm-card rounded-[10px] p-4 mb-5 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
-        <h4 className="text-[13px] text-[#555] mb-3">Run별 성능 추이 (정답+과답%)</h4>
+        <h4 className="text-[13px] text-[#555] mb-3" title="모든 Run의 정답+과답% 변화를 추적합니다">Run별 성능 추이 (정답+과답%)</h4>
         <TrendLineChart labels={data?.trend?.labels || []} values={data?.trend?.values || []} />
       </div>
 
       {/* Delta cards */}
       <div className="flex gap-3 flex-wrap mb-5">
         {[
-          { label: '개선', value: data?.delta?.improve, cls: 'text-score-good' },
-          { label: '회귀', value: data?.delta?.regress, cls: 'text-score-bad' },
-          { label: '변화없음', value: data?.delta?.same, cls: 'text-warm-muted' },
+          { label: '개선', value: data?.delta?.improve, cls: 'text-score-good', title: '이전 Run에서 오답이었던 케이스가 이번에 정답/과답으로 개선된 수' },
+          { label: '회귀', value: data?.delta?.regress, cls: 'text-score-bad', title: '이전 Run에서 정답/과답이었던 케이스가 이번에 오답으로 회귀된 수' },
+          { label: '변화없음', value: data?.delta?.same, cls: 'text-warm-muted', title: '이전 Run과 동일한 판정을 받은 수' },
         ].map((d) => (
-          <div key={d.label} className="bg-warm-card rounded-[10px] py-3.5 px-[18px] flex-1 shadow-[0_1px_4px_rgba(0,0,0,0.07)] text-center">
+          <div key={d.label} className="bg-warm-card rounded-[10px] py-3.5 px-[18px] flex-1 shadow-[0_1px_4px_rgba(0,0,0,0.07)] text-center" title={d.title}>
             <div className={cn('text-[26px] font-bold', d.cls)}>{d.value ?? '—'}</div>
             <div className="text-[11px] text-warm-muted mt-1">{d.label}</div>
           </div>
@@ -126,7 +127,7 @@ export const Phase5Panel: React.FC = () => {
       {/* Regressed cases table */}
       {data?.regressed_cases && data.regressed_cases.length > 0 && (
         <div className="bg-warm-card rounded-[10px] p-4 mb-5 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
-          <h4 className="text-[13px] text-[#555] mb-3">회귀 케이스</h4>
+          <h4 className="text-[13px] text-[#555] mb-3" title="이전에 정답/과답이었는데 이번에 오답으로 바뀐 케이스들입니다. 프롬프트 변경의 부작용을 확인하세요.">회귀 케이스</h4>
           <div className="overflow-x-auto">
             <table className="w-full border-collapse text-xs" style={{ tableLayout: 'fixed' }}>
               <thead>
@@ -157,9 +158,9 @@ export const Phase5Panel: React.FC = () => {
         <h4 className="text-[13px] text-[#555] mb-3">전체 케이스 판정 결과</h4>
         <div className="flex gap-1.5 mb-2">
           <button className="py-1 px-2.5 text-xs border border-[#555] bg-[#2a2a2a] text-[#ccc] rounded cursor-pointer hover:bg-[#3a3a3a]"
-            onClick={() => downloadJSON(data?.cases || [], `phase5_cases_run${runStore.runData?.run_number || ''}.json`)}>JSON ⬇</button>
+            onClick={() => downloadJSON(data?.cases || [], `phase5_cases_run${runStore.runData?.run_number || ''}.json`)} title="판정 결과를 파일로 다운로드합니다">JSON ⬇</button>
           <button className="py-1 px-2.5 text-xs border border-[#555] bg-[#2a2a2a] text-[#ccc] rounded cursor-pointer hover:bg-[#3a3a3a]"
-            onClick={() => downloadXLSX(data?.cases || [], `phase5_cases_run${runStore.runData?.run_number || ''}.xlsx`)}>XLSX ⬇</button>
+            onClick={() => downloadXLSX(data?.cases || [], `phase5_cases_run${runStore.runData?.run_number || ''}.xlsx`)} title="판정 결과를 파일로 다운로드합니다">XLSX ⬇</button>
         </div>
         <DataTable
           columns={P5_COLUMNS}
@@ -178,6 +179,7 @@ export const Phase5Panel: React.FC = () => {
           <button
             className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85"
             onClick={() => ps.setCurrentPhase(6)}
+            title="Phase 6에서 GPT가 이번 실험의 효과를 분석하고 다음 방향을 제시합니다"
           >Phase 6 전략 분석으로 이동 →</button>
         </div>
       )}

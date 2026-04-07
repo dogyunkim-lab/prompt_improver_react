@@ -84,14 +84,14 @@ export const Phase6Panel: React.FC = () => {
     <div>
       {/* Learning rate badge */}
       <div className="mb-4">
-        <span className="inline-block py-1 px-3 rounded-[20px] bg-ctp-blue text-ctp-base text-xs font-bold">
+        <span className="inline-block py-1 px-3 rounded-[20px] bg-ctp-blue text-ctp-base text-xs font-bold" title="이전 실험 성적에 따라 다음 Run에서의 변경 폭을 자동 조절합니다 (explore/major/medium/minor)">
           Learning Rate: {ps.p6LearningRate || data?.experiment_summary || '—'}
         </span>
       </div>
 
       {/* Backprop */}
       <div className="bg-warm-card border border-warm-border rounded-lg py-3 px-4 text-[13px] text-[#444] leading-relaxed mb-4">
-        <h4 className="text-xs text-warm-muted mb-2">Backprop 분석</h4>
+        <h4 className="text-xs text-warm-muted mb-2" title="프롬프트 변경이 각 케이스에 어떤 영향을 미쳤는지 분석합니다">Backprop 분석</h4>
         <div className="whitespace-pre-wrap">
           {data?.backprop || <span className="text-warm-muted">Phase 6 실행 후 표시됩니다.</span>}
         </div>
@@ -99,7 +99,7 @@ export const Phase6Panel: React.FC = () => {
 
       {/* Effective elements */}
       <div className="bg-warm-card rounded-[10px] p-4 mb-4 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
-        <h4 className="text-[13px] text-[#555] mb-3">효과적 요소 (녹색)</h4>
+        <h4 className="text-[13px] text-[#555] mb-3" title="다음 Run에서 반드시 유지해야 할 변경점입니다">효과적 요소 (녹색)</h4>
         <div className="flex flex-wrap gap-1.5">
           {data?.effective?.length ? (
             data.effective.map((tag, i) => (
@@ -115,7 +115,7 @@ export const Phase6Panel: React.FC = () => {
 
       {/* Harmful elements */}
       <div className="bg-warm-card rounded-[10px] p-4 mb-4 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
-        <h4 className="text-[13px] text-[#555] mb-3">해로운 요소 (적색)</h4>
+        <h4 className="text-[13px] text-[#555] mb-3" title="다음 Run에서 제거해야 할 변경점입니다">해로운 요소 (적색)</h4>
         <div className="flex flex-wrap gap-1.5">
           {data?.harmful?.length ? (
             data.harmful.map((tag, i) => (
@@ -131,7 +131,7 @@ export const Phase6Panel: React.FC = () => {
 
       {/* Next direction */}
       <div className="bg-warm-card rounded-[10px] p-4 mb-4 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
-        <h4 className="text-[13px] text-[#555] mb-3">다음 방향</h4>
+        <h4 className="text-[13px] text-[#555] mb-3" title="다음 Run에서의 구체적인 개선 방향입니다. Continue 모드 시 Phase 2에 자동 주입됩니다.">다음 방향</h4>
         <textarea
           className="w-full border border-warm-border rounded-lg py-2.5 px-3.5 bg-warm-hover resize-y min-h-[80px] text-[13px] text-[#444] focus:border-ctp-mauve focus:outline-none"
           value={data?.next_direction || ''}
@@ -157,9 +157,10 @@ export const Phase6Panel: React.FC = () => {
           className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"
           onClick={onRun}
           disabled={isRunning}
+          title="이번 Run의 결과를 종합 분석하여 다음 Run의 개선 방향을 GPT가 도출합니다"
         >Phase 6 실행</button>
         {isRunning && (
-          <button className="py-2 px-3.5 bg-ctp-red text-ctp-base rounded-md font-semibold text-xs hover:opacity-85" onClick={onCancel}>
+          <button className="py-2 px-3.5 bg-ctp-red text-ctp-base rounded-md font-semibold text-xs hover:opacity-85" onClick={onCancel} title="현재 실행을 중단합니다">
             ■ 중단
           </button>
         )}
@@ -172,6 +173,7 @@ export const Phase6Panel: React.FC = () => {
           <button
             className="py-2.5 px-6 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-sm hover:opacity-85"
             onClick={() => openModal('newRun')}
+            title="이 Run의 Phase 6 피드백을 자동 반영하는 Continue 모드 Run을 생성합니다"
           >다음 Run 시작 →</button>
         </div>
       )}

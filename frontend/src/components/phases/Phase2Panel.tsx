@@ -6,7 +6,8 @@ import { LogBox } from '../shared/LogBox';
 import { runPhase, cancelPhase, selectCandidate, saveCustomCandidate } from '../../api/phases';
 import { saveUserGuide } from '../../api/uploads';
 import { cn } from '../../utils/cn';
-import type { Candidate, CandidateNode } from '../../types';
+import { MiniValidationPanel } from './MiniValidationPanel';
+import type { Candidate, CandidateNode, MiniValidationSummary } from '../../types';
 
 interface CustomNode {
   label: string;
@@ -35,8 +36,10 @@ export const Phase2Panel: React.FC = () => {
   const setP2Logs = usePhaseStore((s) => s.setP2Logs);
   const addP2Log = usePhaseStore((s) => s.addP2Log);
   const clearP2Logs = usePhaseStore((s) => s.clearP2Logs);
+  const p2MiniValidation = usePhaseStore((s) => s.p2MiniValidation);
   const setP2LearningRate = usePhaseStore((s) => s.setP2LearningRate);
   const setP2Feedback = usePhaseStore((s) => s.setP2Feedback);
+  const setP2MiniValidation = usePhaseStore((s) => s.setP2MiniValidation);
   const setSelectedCandidateId = usePhaseStore((s) => s.setSelectedCandidateId);
   const setPhaseStatus = usePhaseStore((s) => s.setPhaseStatus);
   const updatePhaseTabsFromRunData = usePhaseStore((s) => s.updatePhaseTabsFromRunData);
@@ -67,6 +70,7 @@ export const Phase2Panel: React.FC = () => {
     const od = p2?.output_data as any | undefined;
     if (od?.design_summary) setP2DesignSummary(od.design_summary as string);
     if (od?.learning_rate) setP2LearningRate(od.learning_rate as string);
+    if (od?.mini_validation_summary) setP2MiniValidation(od.mini_validation_summary as MiniValidationSummary);
 
     // log_text 복원
     if (p2?.log_text && p2Logs.length === 0) {
@@ -94,6 +98,7 @@ export const Phase2Panel: React.FC = () => {
       if (d.candidates) setP2Candidates(d.candidates as Candidate[]);
       if (d.design_summary) setP2DesignSummary(d.design_summary as string);
       if (d.learning_rate) setP2LearningRate(d.learning_rate as string);
+      if (d.mini_validation_summary) setP2MiniValidation(d.mini_validation_summary as MiniValidationSummary);
     },
     onDone: async (status) => {
       setPhaseStatus(2, status === 'completed' ? 'completed' : 'failed');
@@ -115,6 +120,7 @@ export const Phase2Panel: React.FC = () => {
     clearP2Logs();
     setP2Candidates([]);
     setP2DesignSummary('');
+    setP2MiniValidation(null);
     setPhaseStatus(2, 'running');
     setRunningPhase(runId, 2);
     try {
@@ -225,7 +231,7 @@ export const Phase2Panel: React.FC = () => {
       )}
 
       <div className="bg-warm-card rounded-[10px] p-4 mb-4 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
-        <h4 className="text-[13px] text-[#555] mb-1 flex items-center gap-1.5">
+        <h4 className="text-[13px] text-[#555] mb-1 flex items-center gap-1.5" title="프롬프트 설계 시 GPT가 반영할 사용자 지시. 예: 'Chain of thought 사용 금지'">
           전략 가이드 <span className="text-[11px] text-warm-muted font-normal">(선택사항)</span>
         </h4>
         <p className="text-xs text-warm-muted mb-2 leading-normal">
@@ -237,6 +243,7 @@ export const Phase2Panel: React.FC = () => {
           placeholder="전략/프롬프트 설계 시 반영할 사항을 자유롭게 입력하세요..."
           value={userGuide}
           onChange={(e) => setUserGuide(e.target.value)}
+          title="설계 방향을 자유롭게 입력하세요. 비워두면 GPT가 자동으로 최적 전략을 결정합니다."
         />
       </div>
 
@@ -262,7 +269,7 @@ export const Phase2Panel: React.FC = () => {
           className="w-full flex items-center justify-between py-3 px-4 text-[13px] font-semibold text-warm-text hover:bg-warm-hover transition-colors"
           onClick={() => setCustomOpen((v) => !v)}
         >
-          <span>커스텀 후보 작성</span>
+          <span title="GPT 생성 후보를 수정하거나 직접 프롬프트를 작성합니다">커스텀 후보 작성</span>
           <span className={cn('transition-transform text-xs', customOpen && 'rotate-180')}>▼</span>
         </button>
 
@@ -270,7 +277,7 @@ export const Phase2Panel: React.FC = () => {
           <div className="px-4 pb-4 border-t border-warm-table-border">
             {/* 노드 수 선택 */}
             <div className="flex items-center gap-2 mt-3 mb-4">
-              <span className="text-xs text-[#888]">노드 수:</span>
+              <span className="text-xs text-[#888]" title="워크플로우 노드 수. 단일 노드로 충분하면 1개로 설정하세요.">노드 수:</span>
               {[1, 2, 3].map((n) => (
                 <button
                   key={n}
@@ -302,12 +309,15 @@ export const Phase2Panel: React.FC = () => {
               className="mt-3 py-2 px-5 bg-ctp-green text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"
               onClick={handleSaveCustom}
               disabled={customSaving}
+              title="작성한 프롬프트를 저장하고 Phase 3에서 사용할 후보로 선택합니다"
             >
               {customSaving ? '저장 중...' : '저장 및 선택'}
             </button>
           </div>
         )}
       </div>
+
+      {p2MiniValidation && <MiniValidationPanel data={p2MiniValidation} />}
 
       <div className="bg-warm-card rounded-[10px] p-4 mb-5 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
         <h4 className="text-[13px] text-[#555] mb-2.5">디자인 요약</h4>
@@ -333,6 +343,7 @@ export const Phase2Panel: React.FC = () => {
           className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"
           onClick={onRun}
           disabled={isRunning}
+          title="GPT가 4단계로 프롬프트를 설계합니다: 전략수립→프롬프트생성→검증보정→Mini-validation"
         >Phase 2 실행</button>
         {isRunning && (
           <button className="py-2 px-3.5 bg-ctp-red text-ctp-base rounded-md font-semibold text-xs hover:opacity-85" onClick={onCancel}>
@@ -418,12 +429,13 @@ const CandidateCard: React.FC<{
             isSelected ? 'bg-ctp-green text-ctp-base' : 'bg-ctp-mauve text-ctp-base',
           )}
           onClick={onSelect}
+          title="이 후보를 Phase 3에서 사용할 프롬프트로 선택합니다"
         >{isSelected ? '✓ 선택됨' : '후보 선택'}</button>
         {onCopy && (
           <button
             className="py-1.5 px-3 rounded-md font-semibold text-xs bg-warm-table-bg text-[#666] border border-warm-border hover:border-[#999] hover:text-[#333]"
             onClick={onCopy}
-            title="커스텀 에디터에 복사"
+            title="이 후보의 프롬프트를 커스텀 편집기에 복사합니다"
           >복사</button>
         )}
       </div>
@@ -457,7 +469,7 @@ const CustomNodeEditor: React.FC<{
     <div className="mb-4 pb-4 border-b border-[#333] last:border-b-0 last:pb-0 last:mb-0">
       <div className="flex items-center gap-2 mb-2">
         <span className="text-xs font-bold text-ctp-mauve">Node {node.label}</span>
-        <label className="flex items-center gap-1 ml-auto text-[11px] text-[#888] cursor-pointer">
+        <label className="flex items-center gap-1 ml-auto text-[11px] text-[#888] cursor-pointer" title="체크하면 이 노드에서 GPT가 추론(thinking) 후 응답합니다. 복잡한 판단이 필요한 노드에 사용하세요.">
           <input
             type="checkbox"
             checked={node.reasoning}
@@ -476,6 +488,7 @@ const CustomNodeEditor: React.FC<{
           value={node.system_prompt}
           onChange={(e) => onChange('system_prompt', e.target.value)}
           placeholder="시스템 프롬프트를 입력하세요..."
+          title="역할 정의, 규칙, 제약조건을 입력합니다. Dify 워크플로우의 SYSTEM 필드에 해당합니다."
         />
       </div>
 
@@ -487,6 +500,7 @@ const CustomNodeEditor: React.FC<{
           value={node.user_prompt}
           onChange={(e) => onChange('user_prompt', e.target.value)}
           placeholder="유저 프롬프트를 입력하세요... (변수: {stt}, {reference} 등)"
+          title="실제 입력 데이터를 처리하는 템플릿입니다. {stt} 등 변수를 사용합니다. Dify의 USER 필드에 해당합니다."
         />
       </div>
 

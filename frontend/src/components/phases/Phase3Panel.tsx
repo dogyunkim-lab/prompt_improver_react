@@ -128,6 +128,7 @@ export const Phase3Panel: React.FC = () => {
                         type="button"
                         className="w-full flex items-center gap-2 px-3 py-2 bg-warm-hover text-left text-xs font-semibold text-warm-text hover:bg-[#2a2a2a]"
                         onClick={() => toggleNode(key)}
+                        title="클릭하여 이 노드의 프롬프트를 확인합니다"
                       >
                         <span className="text-ctp-mauve">{isOpen ? '▾' : '▸'}</span>
                         <span>Step {idx + 1} 프롬프트 (노드 {node.label})</span>
@@ -182,12 +183,14 @@ export const Phase3Panel: React.FC = () => {
           <input
             className="flex-1 min-w-[160px] py-[7px] px-2.5 border border-warm-border rounded-md bg-warm-hover text-warm-text text-[13px] focus:border-ctp-mauve focus:outline-none"
             placeholder="Dify Workflow Object ID"
+            title="Dify에서 생성한 워크플로우의 고유 ID를 입력하세요"
             value={objectId}
             onChange={(e) => setObjectId(e.target.value)}
           />
           <button
             className="py-[7px] px-3.5 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-xs hover:opacity-85"
             onClick={onConnect}
+            title="입력한 워크플로우 ID로 Dify 연결을 검증합니다"
           >연결 확인</button>
           {difyStatus !== 'none' && (
             <span className={cn('text-sm font-bold', difyStatus === 'verified' ? 'text-score-good' : 'text-score-bad')}>
@@ -210,9 +213,10 @@ export const Phase3Panel: React.FC = () => {
           className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"
           onClick={onExecute}
           disabled={isRunning || difyStatus !== 'verified'}
+          title="모든 케이스를 Dify 워크플로우에서 실행합니다. 최대 5건씩 병렬로 처리됩니다."
         >전체 케이스 실행</button>
         {isRunning && (
-          <button className="py-2 px-3.5 bg-ctp-red text-ctp-base rounded-md font-semibold text-xs hover:opacity-85" onClick={onCancel}>
+          <button className="py-2 px-3.5 bg-ctp-red text-ctp-base rounded-md font-semibold text-xs hover:opacity-85" onClick={onCancel} title="현재 실행을 중단합니다">
             ■ 중단
           </button>
         )}

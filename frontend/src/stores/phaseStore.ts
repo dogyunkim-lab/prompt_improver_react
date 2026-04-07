@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { PhaseStatus, CaseResult, Candidate, LogEntry, SortState, FilterState, Phase5Data, Phase6Data, ChartData } from '../types';
+import type { PhaseStatus, CaseResult, Candidate, LogEntry, SortState, FilterState, Phase5Data, Phase6Data, ChartData, MiniValidationSummary } from '../types';
 
 interface PhaseStore {
   currentPhase: number;
@@ -21,6 +21,7 @@ interface PhaseStore {
   p2Logs: LogEntry[];
   p2LearningRate: string;
   p2Feedback: string;
+  p2MiniValidation: MiniValidationSummary | null;
   selectedCandidateId: number | null;
 
   // Phase 3
@@ -72,6 +73,7 @@ interface PhaseStore {
   clearP2Logs: () => void;
   setP2LearningRate: (r: string) => void;
   setP2Feedback: (f: string) => void;
+  setP2MiniValidation: (mv: MiniValidationSummary | null) => void;
   setSelectedCandidateId: (id: number | null) => void;
 
   // Phase 3 actions
@@ -120,7 +122,7 @@ export const usePhaseStore = create<PhaseStore>((set) => ({
   p1EvalChart: null, p1BucketChart: null, p1Scores: null,
 
   p2Candidates: [], p2DesignSummary: '', p2Logs: [], p2LearningRate: '',
-  p2Feedback: '', selectedCandidateId: null,
+  p2Feedback: '', p2MiniValidation: null, selectedCandidateId: null,
 
   p3Logs: [], p3Progress: { ...defaultProgress },
 
@@ -180,6 +182,7 @@ export const usePhaseStore = create<PhaseStore>((set) => ({
   clearP2Logs: () => set({ p2Logs: [] }),
   setP2LearningRate: (r) => set({ p2LearningRate: r }),
   setP2Feedback: (f) => set({ p2Feedback: f }),
+  setP2MiniValidation: (mv) => set({ p2MiniValidation: mv }),
   setSelectedCandidateId: (id) => set({ selectedCandidateId: id }),
 
   // P3
@@ -216,7 +219,7 @@ export const usePhaseStore = create<PhaseStore>((set) => ({
       p1Cases: [], p1Logs: [], p1Progress: { ...defaultProgress },
       p1EvalChart: null, p1BucketChart: null, p1Scores: null,
       p2Candidates: [], p2DesignSummary: '', p2Logs: [], p2LearningRate: '', p2Feedback: '',
-      selectedCandidateId: null,
+      p2MiniValidation: null, selectedCandidateId: null,
       p3Logs: [], p3Progress: { ...defaultProgress },
       p4Cases: [], p4Logs: [], p4Progress: { ...defaultProgress }, p4Scores: null,
       p5Data: null,

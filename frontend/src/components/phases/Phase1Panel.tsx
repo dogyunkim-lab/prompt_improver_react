@@ -149,16 +149,16 @@ export const Phase1Panel: React.FC = () => {
   const scoreCards = useMemo(() => {
     const s = p1Scores;
     if (!s) return [
-      { label: '정답+과답%', value: '—', sub: '정답 + 과답', variant: 'good' as const },
-      { label: '정답%', value: '—', sub: '정확한 답변', variant: 'default' as const },
-      { label: '과답%', value: '—', sub: '과도한 답변', variant: 'warn' as const },
-      { label: '오답%', value: '—', sub: '틀린 답변', variant: 'bad' as const },
+      { label: '정답+과답%', value: '—', sub: '정답 + 과답', variant: 'good' as const, title: '핵심 지표. 이 비율을 95% 이상으로 올리는 것이 목표입니다.' },
+      { label: '정답%', value: '—', sub: '정확한 답변', variant: 'default' as const, title: 'Reference와 동일한 핵심 내용을 요약한 비율' },
+      { label: '과답%', value: '—', sub: '과도한 답변', variant: 'warn' as const, title: '맞지만 불필요한 내용이 추가된 비율' },
+      { label: '오답%', value: '—', sub: '틀린 답변', variant: 'bad' as const, title: '핵심 내용이 누락되거나 틀린 비율' },
     ];
     return [
-      { label: '정답+과답%', value: fmtPct(s.correct_plus_over), sub: '정답 + 과답', variant: 'good' as const },
-      { label: '정답%', value: fmtPct(s.correct), sub: '정확한 답변', variant: 'default' as const },
-      { label: '과답%', value: fmtPct(s.over), sub: '과도한 답변', variant: 'warn' as const },
-      { label: '오답%', value: fmtPct(s.wrong), sub: '틀린 답변', variant: 'bad' as const },
+      { label: '정답+과답%', value: fmtPct(s.correct_plus_over), sub: '정답 + 과답', variant: 'good' as const, title: '핵심 지표. 이 비율을 95% 이상으로 올리는 것이 목표입니다.' },
+      { label: '정답%', value: fmtPct(s.correct), sub: '정확한 답변', variant: 'default' as const, title: 'Reference와 동일한 핵심 내용을 요약한 비율' },
+      { label: '과답%', value: fmtPct(s.over), sub: '과도한 답변', variant: 'warn' as const, title: '맞지만 불필요한 내용이 추가된 비율' },
+      { label: '오답%', value: fmtPct(s.wrong), sub: '틀린 답변', variant: 'bad' as const, title: '핵심 내용이 누락되거나 틀린 비율' },
     ];
   }, [p1Scores]);
 
@@ -226,7 +226,7 @@ export const Phase1Panel: React.FC = () => {
 
       {/* Upload sections */}
       <div className="bg-warm-card rounded-[10px] p-4 mb-4 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
-        <h4 className="text-[13px] text-[#555] mb-3">Judge JSON 업로드</h4>
+        <h4 className="text-[13px] text-[#555] mb-3" title="LLM Judge가 판정한 결과 JSON 파일을 업로드합니다. 각 케이스의 정답/오답/과답 판정이 포함되어야 합니다.">Judge JSON 업로드</h4>
         <FileDropZone
           onFile={(f) => setJudgeFile(f)}
           accept=".json"
@@ -237,13 +237,14 @@ export const Phase1Panel: React.FC = () => {
             className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"
             onClick={onUploadJudge}
             disabled={!runId || !judgeFile || uploading}
+            title="파일을 서버에 업로드합니다"
           >업로드</button>
           {judgeFileName && <span className="text-xs text-warm-muted">✓ {judgeFileName}</span>}
         </div>
       </div>
 
       <div className="bg-warm-card rounded-[10px] p-4 mb-4 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
-        <h4 className="text-[13px] text-[#555] mb-1">현재 요약 프롬프트 업로드 (선택)</h4>
+        <h4 className="text-[13px] text-[#555] mb-1" title="현재 사용 중인 프롬프트를 제공하면, GPT가 프롬프트 누락/위반까지 정밀 분석합니다.">현재 요약 프롬프트 업로드 (선택)</h4>
         <p className="text-[11px] text-warm-muted mb-2">현재 사용 중인 요약 프롬프트 TXT 파일을 제공하면, Phase 1 분석 시 프롬프트 ��락/위반 여부를 정확히 판단할 수 있습니다.</p>
         <FileDropZone
           onFile={(f) => setPromptFile(f)}
@@ -256,6 +257,7 @@ export const Phase1Panel: React.FC = () => {
             className="py-2 px-4 bg-transparent text-ctp-mauve rounded-md font-semibold text-[13px] border border-ctp-mauve hover:bg-ctp-mauve/10 disabled:opacity-50"
             onClick={onUploadPrompt}
             disabled={!runId || !promptFile || uploading}
+            title="파일을 서버에 업로드합니다"
           >���롬프트 업로드</button>
           {promptFileName && <span className="text-xs text-warm-muted">✓ {promptFileName}</span>}
         </div>
@@ -265,7 +267,7 @@ export const Phase1Panel: React.FC = () => {
 
       {/* Charts */}
       <div className="bg-warm-card rounded-[10px] p-4 mb-5 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
-        <h4 className="text-[13px] text-[#555] mb-3">판정 분포</h4>
+        <h4 className="text-[13px] text-[#555] mb-3" title="Judge 판정(정답/과답/오답)과 오류 원인 버킷의 분포를 시각화합니다">판정 분포</h4>
         <div className="flex gap-5 flex-wrap">
           <div className="flex-1 min-w-[200px]">
             <EvalBarChart data={p1EvalChart} />
@@ -282,12 +284,12 @@ export const Phase1Panel: React.FC = () => {
         <h4 className="text-[13px] text-[#555] mb-3">버킷 설명</h4>
         <div className="grid grid-cols-2 gap-2.5 text-xs leading-relaxed">
           {[
-            { color: '#f38ba8', name: 'STT 오류', desc: '음성인식(STT) 자체의 오류로 인한 잘못된 입력. 프롬프트 개선으로 해결 불가능한 영역.' },
-            { color: '#f9e2af', name: '프롬프트 누락', desc: '프롬프트에 필요한 지시사항이 빠져있거나 불명확하여 발생한 오류.' },
-            { color: '#89b4fa', name: '모델 동작', desc: '프롬프트는 적절하나 모델이 지시를 따르지 못한 경우.' },
-            { color: '#cba6f7', name: 'Judge 이견', desc: '모델 응답은 적절하나 Judge 판정이 잘못된 것으로 의심되는 케이스.' },
+            { color: '#f38ba8', name: 'STT 오류', desc: '음성인식(STT) 자체의 오류로 인한 잘못된 입력. 프롬프트 개선으로 해결 불가능한 영역.', title: 'STT 오전사가 원인. 프롬프트로 해결 불가' },
+            { color: '#f9e2af', name: '프롬프트 누락', desc: '프롬프트에 필요한 지시사항이 빠져있거나 불명확하여 발생한 오류.', title: '프롬프트에 지시가 없어서 발생. 프롬프트 개선으로 해결 가능' },
+            { color: '#89b4fa', name: '모델 동작', desc: '프롬프트는 적절하나 모델이 지시를 따르지 못한 경우.', title: '프롬프트 지시는 있지만 모델이 따르지 않음' },
+            { color: '#cba6f7', name: 'Judge 이견', desc: '모델 응답은 적절하나 Judge 판정이 잘못된 것으로 의심되는 케이스.', title: '사람이 보면 맞는데 Judge가 오답으로 판정' },
           ].map((b) => (
-            <div key={b.name}>
+            <div key={b.name} title={b.title}>
               <span className="inline-block w-2.5 h-2.5 rounded-sm mr-1.5 align-middle" style={{ background: b.color }} />
               <strong>{b.name}</strong><br />
               <span className="text-[#666] ml-4">{b.desc}</span>
@@ -301,9 +303,11 @@ export const Phase1Panel: React.FC = () => {
         <h4 className="text-[13px] text-[#555] mb-3">케이스 목록</h4>
         <div className="flex gap-1.5 mb-2">
           <button className="py-1 px-2.5 text-xs border border-[#555] bg-[#2a2a2a] text-[#ccc] rounded cursor-pointer hover:bg-[#3a3a3a]"
-            onClick={() => downloadJSON(p1Cases, `phase1_cases_run${runData?.run_number || ''}.json`)}>JSON ⬇</button>
+            onClick={() => downloadJSON(p1Cases, `phase1_cases_run${runData?.run_number || ''}.json`)}
+            title="분석 결과를 파일로 다운로드합니다">JSON ⬇</button>
           <button className="py-1 px-2.5 text-xs border border-[#555] bg-[#2a2a2a] text-[#ccc] rounded cursor-pointer hover:bg-[#3a3a3a]"
-            onClick={() => downloadXLSX(p1Cases, `phase1_cases_run${runData?.run_number || ''}.xlsx`)}>XLSX ⬇</button>
+            onClick={() => downloadXLSX(p1Cases, `phase1_cases_run${runData?.run_number || ''}.xlsx`)}
+            title="분석 결과를 파일로 다운로드합니다">XLSX ⬇</button>
         </div>
         <DataTable
           columns={P1_COLUMNS}
@@ -329,6 +333,7 @@ export const Phase1Panel: React.FC = () => {
           onChange={(e) => setReasoning(e.target.value)}
           disabled={isRunning}
           className="py-2 px-2.5 border border-warm-border rounded-md text-[13px] bg-warm-card text-warm-text focus:border-ctp-mauve focus:outline-none disabled:opacity-50"
+          title="GPT 추론 수준. High=정밀하지만 느림, Low=빠르지만 얕은 분석"
         >
           <option value="high">High (정밀)</option>
           <option value="medium">Medium (균형)</option>
@@ -338,11 +343,13 @@ export const Phase1Panel: React.FC = () => {
           className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"
           onClick={onRun}
           disabled={isRunning}
+          title="오답/과답 케이스를 GPT가 병렬로 분석합니다. 케이스 수에 따라 수 분 소요될 수 있습니다."
         >Phase 1 실행</button>
         {isRunning && (
           <button
             className="py-2 px-3.5 bg-ctp-red text-ctp-base rounded-md font-semibold text-xs hover:opacity-85"
             onClick={onCancel}
+            title="현재 실행 중인 Phase 1 분석을 중단합니다"
           >■ 중단</button>
         )}
       </div>
