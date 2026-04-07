@@ -735,13 +735,21 @@ def _build_retry_feedback(candidates: list) -> str:
     return "\n".join(lines)
 
 
+_CASE_DATA_KEYS = frozenset({"stt", "reference", "keywords", "generation_task"})
+
+
 async def _simulate_workflow_for_case(
     candidate: dict, case: dict, sim_config: dict | None = None
 ) -> str:
     """후보의 multi-node workflow를 시뮬레이션 모델(sim_config)로 실행.
-    Dify 워크플로우와 동일하게 입력 → LLM Node 1 → LLM Node 2 → ... → 최종 답변 순서로 실행.
-    각 노드의 output_var가 다음 노드의 input_vars로 전달된다.
-    마지막 노드 결과(pool['generated'])를 반환."""
+
+    변수 해석 전략 (멀티노드에서 변수명 불일치 방지):
+    1. 케이스 데이터 (stt, reference, keywords, generation_task) → pool에서 직접 치환
+    2. 이전 노드 출력 → output_var 이름으로 pool에 저장
+    3. 프롬프트 내 미해석 변수 → input_vars 선언과 이전 노드 출력을 매핑
+       (GPT가 output_var와 다른 이름으로 참조할 때 대비)
+    4. 그래도 남은 변수 → 직전 노드 출력으로 fallback
+    """
     pool = {
         "stt": case.get("stt", ""),
         "reference": case.get("reference", ""),
@@ -751,6 +759,8 @@ async def _simulate_workflow_for_case(
 
     nodes = candidate.get("nodes", [])
     last_result = ""
+    # 이전 노드 출력 이력: [(output_var, result), ...]
+    node_outputs: list[tuple[str, str]] = []
 
     for i, node in enumerate(nodes):
         node_label = node.get("node_label", NODE_LABELS[i] if i < len(NODE_LABELS) else f"N{i}")
@@ -763,11 +773,49 @@ async def _simulate_workflow_for_case(
             if legacy:
                 usr_prompt = legacy
 
-        # Dify 스타일 {{var}} → Python {var} 변환 후 변수 치환
+        # Dify 스타일 {{var}} → Python {var} 변환
         sys_norm = _dify_to_python_vars(sys_prompt)
         usr_norm = _dify_to_python_vars(usr_prompt)
-        sys_rendered = sys_norm.format_map(SafeDict(**pool)) if sys_norm else ""
-        usr_rendered = usr_norm.format_map(SafeDict(**pool)) if usr_norm else ""
+
+        # ── 변수 풀 보강: input_vars 선언에 맞춰 이전 노드 출력 매핑 ──
+        effective_pool = dict(pool)
+        input_vars = node.get("input_vars", [])
+
+        # input_vars 중 pool에 없는 것 → 이전 노드 출력에서 찾기
+        for var_name in input_vars:
+            if var_name in effective_pool:
+                continue
+            # 1순위: 이전 노드 output_var와 이름 일치
+            matched = False
+            for prev_var, prev_val in node_outputs:
+                if prev_var == var_name:
+                    effective_pool[var_name] = prev_val
+                    matched = True
+                    break
+            if not matched and node_outputs:
+                # 2순위: 가장 최근 노드 출력 (이름 불일치 대비)
+                effective_pool[var_name] = node_outputs[-1][1]
+                logger.info(f"[mini-sim] 노드 {node_label}: input_var '{var_name}' → 직전 노드 출력으로 대체")
+
+        # 프롬프트 내 {{var}} 자리 중 아직 pool에 없는 것도 매핑
+        all_placeholders = set(_re.findall(r'\{(\w+)\}', sys_norm + " " + usr_norm))
+        for ph in all_placeholders:
+            if ph in effective_pool or ph in _CASE_DATA_KEYS:
+                continue
+            # 이전 노드 output_var와 이름 일치
+            matched = False
+            for prev_var, prev_val in node_outputs:
+                if prev_var == ph:
+                    effective_pool[ph] = prev_val
+                    matched = True
+                    break
+            if not matched and node_outputs:
+                # 직전 노드 출력으로 fallback
+                effective_pool[ph] = node_outputs[-1][1]
+                logger.info(f"[mini-sim] 노드 {node_label}: 미지 변수 '{ph}' → 직전 노드 출력으로 대체")
+
+        sys_rendered = sys_norm.format_map(SafeDict(**effective_pool)) if sys_norm else ""
+        usr_rendered = usr_norm.format_map(SafeDict(**effective_pool)) if usr_norm else ""
 
         messages = []
         if sys_rendered:
@@ -779,7 +827,7 @@ async def _simulate_workflow_for_case(
             logger.warning(f"[mini-sim] 노드 {node_label}: 프롬프트 비어있음 — 스킵")
             continue
 
-        logger.info(f"[mini-sim] 노드 {node_label} 실행 (input_vars: {node.get('input_vars', [])})")
+        logger.info(f"[mini-sim] 노드 {node_label} 실행 (input_vars={input_vars}, pool_keys={list(effective_pool.keys())})")
         raw_result = await call_gpt(messages, reasoning="low", **(sim_config or {}))
 
         # output_var에 결과 저장 → 다음 노드에서 사용 가능
@@ -788,13 +836,14 @@ async def _simulate_workflow_for_case(
         # JSON 감싸기 등 모델 출력에서 실제 콘텐츠 추출
         result = _extract_node_output(raw_result, output_var)
         if result != raw_result:
-            logger.info(f"[mini-sim] 노드 {node_label}: JSON 출력 감지 → 콘텐츠 추출 ({len(raw_result)}자 → {len(result)}자)")
+            logger.info(f"[mini-sim] 노드 {node_label}: JSON 출력 → 콘텐츠 추출 ({len(raw_result)}자 → {len(result)}자)")
 
         last_result = result
 
         if output_var:
             pool[output_var] = result
-            logger.info(f"[mini-sim] 노드 {node_label} → pool['{output_var}'] 저장 ({len(result)}자)")
+        node_outputs.append((output_var or f"_node_{i}", result))
+        logger.info(f"[mini-sim] 노드 {node_label} 완료 → '{output_var}' ({len(result)}자)")
 
     # 최종 결과를 generated로도 저장
     pool["generated"] = last_result
@@ -1332,8 +1381,9 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
             yield collector.log("info", "Step 4/4: Mini-validation 스킵 (개선 가능한 오답 케이스 없음)")
 
         # ════════════════════════════════════════════════════════════════════
-        # DB 저장
+        # DB 저장 (이전 후보 삭제 후 새로 저장)
         # ════════════════════════════════════════════════════════════════════
+        await db.execute("DELETE FROM prompt_candidates WHERE run_id=?", (run_id,))
         for cand in final_candidates:
             await _save_candidate_to_db(db, run_id, cand, design_mode)
         await db.commit()
