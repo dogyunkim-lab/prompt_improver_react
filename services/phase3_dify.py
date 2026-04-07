@@ -120,13 +120,11 @@ async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
         semaphore = asyncio.Semaphore(DIFY_CONCURRENCY)
         completed = 0
         errors = 0
-        # 케이스별 결과를 수집 후 메인 루프에서 일괄 DB 저장 (커넥션 공유 문제 방지)
-        case_results_queue: asyncio.Queue = asyncio.Queue()
 
         conn = connections[0]  # 첫 번째 연결 사용
 
-        async def process_case(case: dict):
-            nonlocal completed, errors
+        async def process_case(case: dict) -> dict:
+            """Dify 호출만 수행하고 결과를 dict로 반환. DB 접근 없음."""
             async with semaphore:
                 case_id = case["case_id"]
                 for attempt in range(3):
@@ -148,82 +146,69 @@ async def run_phase3(run_id: int) -> AsyncGenerator[str, None]:
                                 intermediate[k] = {"node": node_label, "content": str(v) if v else ""}
                             else:
                                 intermediate[k] = {"node": "?", "content": str(v) if v else ""}
-                        # 결과를 큐에 넣고 메인 루프에서 일괄 DB 저장
-                        await case_results_queue.put({
-                            "case_id": case_id,
-                            "generated": generated,
-                            "intermediate": intermediate,
-                        })
-                        completed += 1
-                        return f"ok:{elapsed}"
+                        return {"ok": True, "case_id": case_id, "generated": generated,
+                                "intermediate": intermediate, "elapsed": elapsed}
                     except Exception as e:
                         if attempt < 2:
                             await asyncio.sleep(2)
                         else:
-                            errors += 1
-                            return f"error:{e}"
+                            return {"ok": False, "case_id": case_id, "error": str(e)}
+                return {"ok": False, "case_id": case["case_id"], "error": "max retries"}
 
         pending_tasks = [asyncio.create_task(process_case(c)) for c in cases]
 
         try:
             done_count = 0
             for coro in asyncio.as_completed(pending_tasks):
-                result_str = await coro
+                result = await coro
                 done_count += 1
-                if result_str.startswith("ok:"):
-                    elapsed = result_str.split(":")[1]
-                    yield collector.log("ok", f"완료 ({elapsed}s)")
+
+                if result["ok"]:
+                    # 메인 루프에서 단일 커넥션으로 직접 DB 저장 (동시 접근 없음)
+                    intermediate = result["intermediate"]
+                    await db.execute(
+                        "UPDATE case_results SET generated=?, intermediate_outputs=? WHERE run_id=? AND case_id=?",
+                        (result["generated"],
+                         json.dumps(intermediate, ensure_ascii=False) if intermediate else None,
+                         run_id, result["case_id"])
+                    )
+                    completed += 1
+                    yield collector.log("ok", f"완료 ({result['elapsed']}s)")
                 else:
-                    yield collector.log("warn", f"실패: {result_str.split(':', 1)[1]}")
+                    errors += 1
+                    yield collector.log("warn", f"실패: {result.get('error', 'unknown')}")
+
                 yield progress_event(done_count, total)
 
-                # 큐에 쌓인 결과를 메인 커넥션에서 일괄 저장 (배치 단위 commit)
-                batch_count = 0
-                while not case_results_queue.empty():
-                    try:
-                        cr = case_results_queue.get_nowait()
-                        await db.execute(
-                            "UPDATE case_results SET generated=?, intermediate_outputs=? WHERE run_id=? AND case_id=?",
-                            (cr["generated"],
-                             json.dumps(cr["intermediate"], ensure_ascii=False) if cr["intermediate"] else None,
-                             run_id, cr["case_id"])
-                        )
-                        batch_count += 1
-                    except asyncio.QueueEmpty:
-                        break
-                if batch_count > 0:
+                # 20건마다 중간 commit (대용량 안전)
+                if completed > 0 and completed % 20 == 0:
                     await db.commit()
+
+            # 최종 commit — 모든 케이스 결과 확정
+            await db.commit()
         finally:
             for t in pending_tasks:
                 if not t.done():
                     t.cancel()
 
-        # 잔여 큐 비우기 (마지막 배치)
-        final_batch = 0
-        while not case_results_queue.empty():
-            try:
-                cr = case_results_queue.get_nowait()
-                await db.execute(
-                    "UPDATE case_results SET generated=?, intermediate_outputs=? WHERE run_id=? AND case_id=?",
-                    (cr["generated"],
-                     json.dumps(cr["intermediate"], ensure_ascii=False) if cr["intermediate"] else None,
-                     run_id, cr["case_id"])
-                )
-                final_batch += 1
-            except asyncio.QueueEmpty:
-                break
-        if final_batch > 0:
-            await db.commit()
+        # DB 검증: 실제 저장된 generated 건수 확인
+        async with db.execute(
+            "SELECT COUNT(*) as cnt FROM case_results WHERE run_id=? AND generated IS NOT NULL AND generated != ''",
+            (run_id,)
+        ) as cursor:
+            verified_count = (await cursor.fetchone())["cnt"]
+        yield collector.log("info", f"DB 검증: {verified_count}/{total}건 generated 저장 확인")
 
-        msg = f"{total}개 케이스 완료 (오류: {errors}건)"
+        msg = f"{total}개 케이스 완료 (성공: {completed}, 오류: {errors}건)"
         yield collector.log("ok" if errors == 0 else "warn", msg)
 
-        output = {"total": total, "completed": completed, "errors": errors}
+        output = {"total": total, "completed": completed, "errors": errors, "verified": verified_count}
 
         # 전체 실패 시 failed 처리 (Phase 4가 빈 데이터로 시작하는 것 방지)
-        if completed == 0:
+        if verified_count == 0:
             final_status = "failed"
             run_status = "failed"
+            yield collector.log("error", "DB에 저장된 generated가 0건입니다. Phase 3 실패 처리합니다.")
         else:
             final_status = "completed"
             run_status = "phase3_done"

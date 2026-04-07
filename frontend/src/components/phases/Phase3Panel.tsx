@@ -220,6 +220,13 @@ export const Phase3Panel: React.FC = () => {
             ■ 중단
           </button>
         )}
+        {phaseStatus[3] === 'completed' && (
+          <button
+            className="py-2 px-4 bg-ctp-green text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 ml-auto"
+            onClick={() => usePhaseStore.getState().setCurrentPhase(4)}
+            title="Phase 4 Judge 재판정으로 이동합니다"
+          >Phase 4 Judge 재판정 →</button>
+        )}
       </div>
     </div>
   );
