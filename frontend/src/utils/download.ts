@@ -25,10 +25,14 @@ export function downloadJudgeResultJSON(
 
   const output = {
     summary: {
+      run_id: '',
       total_cases: cases.length,
+      model_used: '',
+      source_file: '',
       generation_task: meta?.generationTask || '',
-      run_number: meta?.runNumber ?? null,
+      started_at: '',
       finished_at: new Date().toISOString(),
+      duration_seconds: 0,
       failed_evaluation_ids: failedIds,
     },
     cases: cases.map((c) => ({
@@ -38,6 +42,8 @@ export function downloadJudgeResultJSON(
       reference: c.reference || '',
       keywords: c.keywords || '',
       generated: c.generated || '',
+      reasoning_effort: '',
+      reasoning_effort_result: '',
       answer_evaluation: c.evaluation || '',
       answer_evaluation_reason: c.reason || '',
     })),
