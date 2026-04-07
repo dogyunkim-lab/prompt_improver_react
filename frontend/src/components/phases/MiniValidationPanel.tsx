@@ -59,8 +59,8 @@ const CandidateGroup: React.FC<{ result: MiniValidationSummary['candidate_result
             </tr>
           </thead>
           <tbody>
-            {result.details.map((d) => (
-              <DetailRow key={d.case_id} detail={d} />
+            {result.details.map((d, i) => (
+              <DetailRow key={`${d.case_id || i}`} detail={d} />
             ))}
           </tbody>
         </table>

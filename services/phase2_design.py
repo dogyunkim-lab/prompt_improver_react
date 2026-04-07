@@ -604,6 +604,75 @@ def _dify_to_python_vars(text: str) -> str:
     return _re.sub(r'\{\{(\w+)\}\}', r'{\1}', text)
 
 
+def _extract_node_output(raw: str, output_var: str) -> str:
+    """LLM 노드 출력에서 실제 콘텐츠를 추출.
+
+    Dify 워크플로우의 LLM 노드는 plain text를 반환하지만,
+    시뮬레이션에서 모델이 JSON으로 감싸서 출력하는 경우가 있다.
+    예: {"generated": "실제 요약 내용"} 또는 {"analysis": "분석 결과"}
+
+    추출 우선순위:
+    1. JSON 파싱 → output_var 키 → "generated" 키 → 첫 번째 string 값
+    2. 마크다운 코드블록 내 JSON
+    3. 파싱 실패 시 원본 그대로 반환
+    """
+    if not raw or not raw.strip():
+        return raw
+
+    text = raw.strip()
+
+    # 마크다운 코드블록 제거: ```json ... ``` 또는 ``` ... ```
+    md_match = _re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', text, _re.DOTALL)
+    if md_match:
+        text = md_match.group(1).strip()
+
+    # JSON 파싱 시도
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            # 1순위: output_var 키
+            if output_var and output_var in parsed:
+                val = parsed[output_var]
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            # 2순위: "generated" 키
+            if "generated" in parsed:
+                val = parsed["generated"]
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            # 3순위: 첫 번째 string 값
+            for v in parsed.values():
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+        # dict가 아닌 경우 (문자열 등) 그대로
+        if isinstance(parsed, str):
+            return parsed
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # JSON 파싱 실패 — 텍스트 내에 JSON이 포함된 경우 추출 시도
+    # 예: "결과입니다:\n{"generated": "요약 내용"}" 같은 패턴
+    json_match = _re.search(r'\{[^{}]*"(?:' + _re.escape(output_var or 'generated') + r'|generated)"\s*:\s*"', text)
+    if json_match:
+        try:
+            # { 시작 위치부터 끝까지 JSON 추출
+            substr = text[json_match.start():]
+            # 단일 레벨 JSON 추출
+            brace_match = _re.search(r'\{[^{}]*\}', substr)
+            if brace_match:
+                parsed = json.loads(brace_match.group(0))
+                if isinstance(parsed, dict):
+                    for key in [output_var, "generated"]:
+                        if key and key in parsed:
+                            val = parsed[key]
+                            if isinstance(val, str) and val.strip():
+                                return val.strip()
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    return raw
+
+
 async def _select_validation_cases(
     run_id: int, improvable_cases: list, max_cases: int = 3
 ) -> list[dict]:
@@ -711,11 +780,18 @@ async def _simulate_workflow_for_case(
             continue
 
         logger.info(f"[mini-sim] 노드 {node_label} 실행 (input_vars: {node.get('input_vars', [])})")
-        result = await call_gpt(messages, reasoning="low", **(sim_config or {}))
-        last_result = result
+        raw_result = await call_gpt(messages, reasoning="low", **(sim_config or {}))
 
         # output_var에 결과 저장 → 다음 노드에서 사용 가능
         output_var = node.get("output_var", "")
+
+        # JSON 감싸기 등 모델 출력에서 실제 콘텐츠 추출
+        result = _extract_node_output(raw_result, output_var)
+        if result != raw_result:
+            logger.info(f"[mini-sim] 노드 {node_label}: JSON 출력 감지 → 콘텐츠 추출 ({len(raw_result)}자 → {len(result)}자)")
+
+        last_result = result
+
         if output_var:
             pool[output_var] = result
             logger.info(f"[mini-sim] 노드 {node_label} → pool['{output_var}'] 저장 ({len(result)}자)")
