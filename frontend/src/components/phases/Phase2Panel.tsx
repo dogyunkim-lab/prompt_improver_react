@@ -65,12 +65,12 @@ export const Phase2Panel: React.FC = () => {
     if (runData.user_guide) setUserGuide(runData.user_guide);
     if (runData.selected_candidate_id) setSelectedCandidateId(runData.selected_candidate_id);
 
-    const p2 = runData.phases?.[2];
+    const p2 = runData.phases?.[2] as any;
     if (p2?.candidates?.length) setP2Candidates(p2.candidates);
-    const od = p2?.output_data as any | undefined;
-    if (od?.design_summary) setP2DesignSummary(od.design_summary as string);
-    if (od?.learning_rate) setP2LearningRate(od.learning_rate as string);
-    if (od?.mini_validation_summary) setP2MiniValidation(od.mini_validation_summary as MiniValidationSummary);
+    // output_data는 백엔드에서 phase 객체에 직접 spread됨 (**output_data)
+    if (p2?.design_summary) setP2DesignSummary(p2.design_summary as string);
+    if (p2?.learning_rate) setP2LearningRate(p2.learning_rate as string);
+    if (p2?.mini_validation_summary) setP2MiniValidation(p2.mini_validation_summary as MiniValidationSummary);
 
     // log_text 복원
     if (p2?.log_text && p2Logs.length === 0) {
