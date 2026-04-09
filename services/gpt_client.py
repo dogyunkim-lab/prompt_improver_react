@@ -1,3 +1,4 @@
+import re
 import logging
 from functools import lru_cache
 from openai import AsyncOpenAI
@@ -52,7 +53,11 @@ async def call_gpt(messages: list, reasoning: str = "high", timeout: float = 180
             extra_body=extra_body,
             timeout=timeout,
         )
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        # Qwen thinking 모드: <think>...</think> 태그 제거 (downstream JSON 파싱 오류 방지)
+        if is_qwen and content and "<think>" in content:
+            content = re.sub(r"<think>.*?</think>\s*", "", content, flags=re.DOTALL)
+        return content
     except Exception as e:
         msg = f"{tag} 호출 오류 — {use_base}  {type(e).__name__}: {e}"
         logger.error(msg)
