@@ -9,6 +9,11 @@ GPT_API_KEY     = os.getenv("GPT_API_KEY", "")
 GPT_MODEL       = os.getenv("GPT_MODEL", "gpt-oss-120b-26")
 GPT_REASONING   = os.getenv("GPT_REASONING", "high")   # low / medium / high
 
+# Qwen 3.5 API (OpenAI-compatible via vLLM) — 선택적
+QWEN_API_BASE  = os.getenv("QWEN_API_BASE", "")
+QWEN_API_KEY   = os.getenv("QWEN_API_KEY", "")
+QWEN_MODEL     = os.getenv("QWEN_MODEL", "qwen3.5-35b-a3b")
+
 # Dify (CLIENT_ID/SECRET/BASE_URL은 고정값, object_id는 Phase 3 UI에서 워크플로우별 입력)
 DIFY_CLIENT_ID     = os.getenv("DIFY_CLIENT_ID", "")
 DIFY_CLIENT_SECRET = os.getenv("DIFY_CLIENT_SECRET", "")

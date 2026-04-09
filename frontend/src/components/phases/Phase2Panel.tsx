@@ -6,6 +6,8 @@ import { LogBox } from '../shared/LogBox';
 import { runPhase, cancelPhase, selectCandidate, saveCustomCandidate } from '../../api/phases';
 import { saveUserGuide } from '../../api/uploads';
 import { cn } from '../../utils/cn';
+import { ReasoningSelect } from '../shared/ReasoningSelect';
+import { useTaskStore } from '../../stores/taskStore';
 import { MiniValidationPanel } from './MiniValidationPanel';
 import type { Candidate, CandidateNode, MiniValidationSummary } from '../../types';
 
@@ -45,6 +47,11 @@ export const Phase2Panel: React.FC = () => {
   const updatePhaseTabsFromRunData = usePhaseStore((s) => s.updatePhaseTabsFromRunData);
 
   const runId = selectedRunId;
+
+  const selectedTaskId = useTaskStore((s) => s.selectedTaskId);
+  const tasks = useTaskStore((s) => s.tasks);
+  const currentTask = tasks.find((t) => t.id === selectedTaskId);
+
   const [userGuide, setUserGuide] = useState('');
   const [reasoning, setReasoning] = useState('high');
   const isRunning = phaseStatus[2] === 'running';
@@ -329,16 +336,12 @@ export const Phase2Panel: React.FC = () => {
       <LogBox logs={p2Logs} />
 
       <div className="flex items-center gap-3 flex-wrap">
-        <select
+        <ReasoningSelect
           value={reasoning}
-          onChange={(e) => setReasoning(e.target.value)}
+          onChange={setReasoning}
           disabled={isRunning}
-          className="py-2 px-2.5 border border-warm-border rounded-md text-[13px] bg-warm-card text-warm-text focus:border-ctp-mauve focus:outline-none disabled:opacity-50"
-        >
-          <option value="high">High (정밀)</option>
-          <option value="medium">Medium (균형)</option>
-          <option value="low">Low (빠름)</option>
-        </select>
+          modelName={currentTask?.gpt_model}
+        />
         <button
           className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"
           onClick={onRun}

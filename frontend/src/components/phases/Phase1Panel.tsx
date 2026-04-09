@@ -17,6 +17,8 @@ import { runPhase, cancelPhase } from '../../api/phases';
 import { downloadJSON, downloadXLSX } from '../../utils/download';
 import { fmtPct } from '../../utils/format';
 import { cn } from '../../utils/cn';
+import { ReasoningSelect } from '../shared/ReasoningSelect';
+import { useTaskStore } from '../../stores/taskStore';
 import type { CaseResult } from '../../types';
 
 const P1_COLUMNS: Column[] = [
@@ -84,6 +86,10 @@ export const Phase1Panel: React.FC = () => {
   const updatePhaseTabsFromRunData = usePhaseStore((s) => s.updatePhaseTabsFromRunData);
 
   const runId = selectedRunId;
+
+  const selectedTaskId = useTaskStore((s) => s.selectedTaskId);
+  const tasks = useTaskStore((s) => s.tasks);
+  const currentTask = tasks.find((t) => t.id === selectedTaskId);
 
   const [judgeFile, setJudgeFile] = useState<File | null>(null);
   const [promptFile, setPromptFile] = useState<File | null>(null);
@@ -328,17 +334,12 @@ export const Phase1Panel: React.FC = () => {
 
       {/* Action bar */}
       <div className="flex items-center gap-3 flex-wrap">
-        <select
+        <ReasoningSelect
           value={reasoning}
-          onChange={(e) => setReasoning(e.target.value)}
+          onChange={setReasoning}
           disabled={isRunning}
-          className="py-2 px-2.5 border border-warm-border rounded-md text-[13px] bg-warm-card text-warm-text focus:border-ctp-mauve focus:outline-none disabled:opacity-50"
-          title="GPT 추론 수준. High=정밀하지만 느림, Low=빠르지만 얕은 분석"
-        >
-          <option value="high">High (정밀)</option>
-          <option value="medium">Medium (균형)</option>
-          <option value="low">Low (빠름)</option>
-        </select>
+          modelName={currentTask?.gpt_model}
+        />
         <button
           className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"
           onClick={onRun}

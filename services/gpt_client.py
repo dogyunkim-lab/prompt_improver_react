@@ -5,6 +5,19 @@ from config import GPT_API_BASE, GPT_API_KEY, GPT_MODEL
 
 logger = logging.getLogger(__name__)
 
+
+def _build_extra_body(model_name: str, reasoning: str) -> dict:
+    """모델 타입에 따라 적절한 extra_body를 생성."""
+    model_lower = (model_name or "").lower()
+    if "qwen" in model_lower:
+        # Qwen 3.5: enable_thinking on/off (high/medium→True, low→False)
+        enable = reasoning.lower() != "low"
+        return {"chat_template_kwargs": {"enable_thinking": enable}}
+    else:
+        # GPT 계열: reasoning_effort (high/medium/low)
+        return {"reasoning_effort": reasoning}
+
+
 # api_key가 비어있으면 openai 클라이언트가 오류를 내므로 기본값 설정
 _client = AsyncOpenAI(
     base_url=GPT_API_BASE,
@@ -24,17 +37,24 @@ async def call_gpt(messages: list, reasoning: str = "high", timeout: float = 180
     client = _get_client(api_base, api_key) if api_base else _client
     use_model = model or GPT_MODEL
     use_base = api_base or GPT_API_BASE
-    logger.info(f"[GPT] POST {use_base}/chat/completions  model={use_model}  reasoning={reasoning}")
+    extra_body = _build_extra_body(use_model, reasoning)
+    is_qwen = "qwen" in (use_model or "").lower()
+    tag = "Qwen" if is_qwen else "GPT"
+    if is_qwen:
+        thinking_flag = "on" if extra_body.get("chat_template_kwargs", {}).get("enable_thinking") else "off"
+        logger.info(f"[{tag}] POST {use_base}/chat/completions  model={use_model}  thinking={thinking_flag}")
+    else:
+        logger.info(f"[{tag}] POST {use_base}/chat/completions  model={use_model}  reasoning={reasoning}")
     try:
         response = await client.chat.completions.create(
             model=use_model,
             messages=messages,
-            extra_body={"reasoning_effort": reasoning},
+            extra_body=extra_body,
             timeout=timeout,
         )
         return response.choices[0].message.content
     except Exception as e:
-        msg = f"GPT 호출 오류 — {use_base}  {type(e).__name__}: {e}"
+        msg = f"{tag} 호출 오류 — {use_base}  {type(e).__name__}: {e}"
         logger.error(msg)
         raise RuntimeError(msg) from e
 

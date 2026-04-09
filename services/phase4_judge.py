@@ -232,7 +232,7 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
         }
         # 케이스 목록 조회 (프론트 테이블용)
         async with db.execute(
-            """SELECT case_id, stt, reference, generated, evaluation, reason, intermediate_outputs
+            """SELECT case_id, stt, reference, keywords, generation_task, generated, evaluation, reason, intermediate_outputs
                FROM case_results WHERE run_id=? ORDER BY rowid""",
             (run_id,)
         ) as cursor:
@@ -242,6 +242,7 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
             "id": r["case_id"], "evaluation": r["evaluation"] or "",
             "reason": r["reason"] or "", "stt": r["stt"] or "",
             "reference": r["reference"] or "", "generated": r["generated"] or "",
+            "keywords": r["keywords"] or "", "generation_task": r["generation_task"] or "",
             "intermediate_outputs": json.loads(r["intermediate_outputs"]) if r.get("intermediate_outputs") else {},
         } for r in result_cases]
 
