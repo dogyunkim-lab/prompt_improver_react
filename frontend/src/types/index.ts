@@ -13,10 +13,9 @@ export interface Task {
   sim_api_base?: string;
   sim_api_key?: string;
   sim_model?: string;
-  judge_api_base?: string;
-  judge_api_key?: string;
-  judge_model?: string;
   anchor_guide_file?: string;
+  label_list?: string[];
+  label_definitions?: Record<string, string>;
   created_at?: string;
   runs: Run[];
 }
@@ -60,6 +59,19 @@ export interface PhaseData {
   bucket_chart?: ChartData;
   candidates?: Candidate[];
   scores?: Record<string, number>;
+  // Classification 전용 (Phase 1)
+  task_type?: 'summarization' | 'classification';
+  label_list?: string[];
+  label_definitions?: Record<string, string>;
+  confusion_matrix?: ConfusionMatrix;
+  top_confusions?: Array<{ pair: string; count: number }>;
+  error_cause_counts?: Record<string, number>;
+  schema_violation_count?: number;
+  missed_signals?: Array<{ text: string; count: number }>;
+  overweighted_signals?: Array<{ text: string; count: number }>;
+  label_definition_gaps?: string;
+  recommended_focus?: string;
+  top_issues?: string[];
 }
 
 export type PhaseStatus = 'idle' | 'pending' | 'running' | 'completed' | 'done' | 'failed' | 'cancelled';
@@ -91,6 +103,24 @@ export interface CaseResult {
   // Phase 5 delta
   prev_judge?: string;
   delta_type?: 'improved' | 'regressed' | 'unchanged' | 'new';
+  // Classification 전용
+  ref_label?: string;
+  pred_label?: string;
+  label_in_schema?: boolean;
+  closest_label?: string;
+  confusion_pair?: string;
+  key_signals_in_stt?: string[];
+  missed_signals?: string[];
+  overweighted_signals?: string[];
+  boundary_analysis?: string;
+  error_cause?: string;
+  secondary_cause?: string;
+}
+
+/* ── Confusion Matrix ── */
+export interface ConfusionMatrix {
+  labels: string[];
+  matrix: number[][];
 }
 
 /* ── Candidate ── */

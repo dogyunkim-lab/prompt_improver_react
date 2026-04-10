@@ -1,10 +1,14 @@
-import asyncio
 import json
 from datetime import datetime
 from typing import AsyncGenerator
 from database import get_db
-from services.gpt_client import call_gpt, get_task_judge_config, get_task_type
+from services.gpt_client import get_task_type
 from services.delta import compute_and_save_deltas, aggregate_scores
+from services.judge_api import (
+    JudgeAPIError,
+    run_judge_for_cases,
+    validate_generation_task,
+)
 from services.sse_helpers import log_event, progress_event, result_event, done_event, LogCollector
 
 
@@ -32,74 +36,6 @@ def _exact_match_classify(reference: str, generated: str) -> tuple:
     if ref == gen:
         return "정답", "라벨 일치"
     return "오답", f"라벨 불일치 (정답: {reference})"
-
-SYSTEM_PROMPT_PATH = "prompts/phase4_judge.txt"
-USER_PROMPT_PATH = "prompts/phase4_judge_user.txt"
-JUDGE_CONCURRENCY = 5
-
-
-def _load_prompt(path: str) -> str:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
-    except FileNotFoundError:
-        return ""
-
-
-def _extract_json(text: str) -> dict:
-    """실제 Judge와 동일: re.search(r'\\{[^{}]*\\}') 로 단일 레벨 JSON 추출."""
-    import re
-    try:
-        json_match = re.search(r'\{[^{}]*\}', text)
-        if json_match:
-            return json.loads(json_match.group(0))
-    except Exception:
-        pass
-    return {}
-
-
-def _classify_from_text(raw_text: str) -> tuple:
-    """텍스트에서 정답/과답/오답 분류 — 실제 Judge evaluate_answer 폴백 로직 그대로 재현."""
-    result = raw_text if isinstance(raw_text, str) else ""
-    result_lower = result.lower()
-
-    # 1순위: 결론 상반 감지 (가장 중요!)
-    has_opposite = False
-    if "불기" in result and "가능" in result:
-        if "reference" in result_lower and "generated" in result_lower:
-            has_opposite = True
-        elif ("가능" in result and "•" in result) or \
-             ("opposite" in result_lower) or ("contradict" in result_lower):
-            has_opposite = True
-
-    if has_opposite or "opposite conclusion" in result_lower or "결론 상반" in result:
-        return "오답", "결론 상반"
-
-    # 2순위: 명시적 평가 키워드 (한국어)
-    if "오답" in result and "정답" not in result:
-        return "오답", "정보 불일치"
-    if "과답" in result and "정답" not in result:
-        return "과답", "추가 정보 포함"
-    if "누락" in result and "정답" not in result:
-        return "오답", "정보 누락"
-    if "정답" in result and "오답" not in result and "누락" not in result:
-        return "정답", "동일 정보"
-
-    # 3순위: 영어 키워드 - 부정적 키워드 먼저 체크
-    if "wrong" in result_lower or "incorrect" in result_lower:
-        return "오답", "정보 불일치"
-    if "missing" in result_lower or "lacks" in result_lower or "does not mention" in result_lower:
-        return "오답", "정보 누락"
-    if "extra" in result_lower or "additional" in result_lower or "unnecessary" in result_lower:
-        return "과답", "추가 정보 포함"
-
-    # 4순위: 긍정적 키워드 (가장 마지막)
-    if ("same" in result_lower or "matches" in result_lower or "identical" in result_lower) and \
-            "not" not in result_lower[:50]:
-        return "정답", "동일 정보"
-
-    # 폴백: 평가실패 유지 (실제 Judge와 동일)
-    return "평가실패", "평가 불가"
 
 
 async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
@@ -134,111 +70,100 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
         task_type = await get_task_type(run_id)
         is_classification = task_type == "classification"
 
-        # 실험별 Judge LLM 설정 로드 (judge_* → 폴백 gpt_*) — classification은 사용 안 함
-        gpt_config = None if is_classification else await get_task_judge_config(run_id)
+        total = len(cases)
 
         if is_classification:
-            judge_system = ""
-            user_template = ""
+            # ── Classification: 텍스트 일치 비교 (LLM/API 호출 없음) ──
+            yield collector.log("info", f"Classification 정답 판정 시작: {total}건 (텍스트 일치 비교)")
+            processed = 0
+            for case in cases:
+                ref = (case.get("reference") or "").strip()
+                gen = (case.get("generated") or "").strip()
+                evaluation, reason = _exact_match_classify(ref, gen)
+                await db.execute(
+                    "UPDATE case_results SET evaluation=?, reason=? WHERE run_id=? AND case_id=?",
+                    (evaluation, reason, run_id, case["case_id"])
+                )
+                await db.commit()
+                processed += 1
+                yield collector.log("ok", f"판정: {evaluation}")
+                yield progress_event(processed, total)
         else:
-            judge_system = _load_prompt(SYSTEM_PROMPT_PATH)
-            user_template = _load_prompt(USER_PROMPT_PATH)
-            if not user_template:
-                yield collector.log("error", f"User 프롬프트 템플릿이 없습니다: {USER_PROMPT_PATH}")
+            # ── Summarization: LLM Judge API 사용 ──
+            # generation_task 검증 (API enum)
+            generation_task_value = ""
+            for c in cases:
+                if c.get("generation_task"):
+                    generation_task_value = c["generation_task"]
+                    break
+            if not generation_task_value:
+                # case에 없으면 task에서 다시 조회
+                async with db.execute(
+                    "SELECT t.generation_task FROM runs r JOIN tasks t ON t.id=r.task_id WHERE r.id=?",
+                    (run_id,)
+                ) as cursor:
+                    row = await cursor.fetchone()
+                generation_task_value = (row["generation_task"] if row else "") or ""
+
+            try:
+                gt = validate_generation_task(generation_task_value)
+            except JudgeAPIError as e:
+                yield collector.log("error", str(e))
                 yield done_event("failed")
                 return
 
-        total = len(cases)
-        if is_classification:
-            yield collector.log("info", f"Classification 정답 판정 시작: {total}건 (텍스트 일치 비교)")
-        else:
-            yield collector.log("info", f"Judge 실행 시작: {total}건")
+            yield collector.log("info", f"Judge API 호출 시작: {total}건 (generation_task={gt})")
+            yield progress_event(0, total)
 
-        semaphore = asyncio.Semaphore(JUDGE_CONCURRENCY)
-        done_count = 0
-
-        async def judge_case(case: dict):
-            nonlocal done_count
-            async with semaphore:
-                ref = (case.get("reference") or "").strip()
-                gen = (case.get("generated") or "").strip()
-
-                # Classification: 텍스트 일치 비교 (LLM 호출 없음)
-                if is_classification:
-                    evaluation, reason = _exact_match_classify(ref, gen)
-                    await db.execute(
-                        "UPDATE case_results SET evaluation=?, reason=? WHERE run_id=? AND case_id=?",
-                        (evaluation, reason, run_id, case["case_id"])
-                    )
-                    await db.commit()
-                    done_count += 1
-                    return evaluation
-
-                # Summarization: Judge LLM 호출
-                # 사전 판정: reference가 비어있는 케이스
-                if not ref or ref == "없음":
-                    if not gen or gen == "없음":
-                        evaluation, reason = "정답", "reference 없음 — generated도 없음 (정상)"
-                    else:
-                        evaluation, reason = "오답", "reference 없음 — generated가 불필요한 내용 생성"
-                    await db.execute(
-                        "UPDATE case_results SET evaluation=?, reason=? WHERE run_id=? AND case_id=?",
-                        (evaluation, reason, run_id, case["case_id"])
-                    )
-                    await db.commit()
-                    done_count += 1
-                    return evaluation
-
-                user_content = user_template.format(
-                    stt=case.get("stt", ""),
-                    generation_task=case.get("generation_task", ""),
-                    reference=ref,
-                    keywords=case.get("keywords", ""),
-                    generated=gen,
+            sub_dir = f"phase4/run_{run_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            try:
+                judge_cases, judge_summary = await run_judge_for_cases(
+                    cases=cases,
+                    generation_task=gt,
+                    sub_dir=sub_dir,
+                    request_id=f"run{run_id}",
                 )
-                messages = []
-                if judge_system:
-                    messages.append({"role": "system", "content": judge_system})
-                messages.append({"role": "user", "content": user_content})
-                try:
-                    raw = await call_gpt(messages, reasoning="low", **(gpt_config or {}))
-                    result = _extract_json(raw)
-                    # 실제 Judge와 동일: JSON에서 "rating" 키로 추출
-                    evaluation = result.get("rating", "평가실패")
-                    reason = result.get("reason", "")
+            except JudgeAPIError as e:
+                yield collector.log("error", f"Judge API 실패: {e}")
+                yield done_event("failed")
+                return
 
-                    # JSON 파싱 실패 시 텍스트에서 추출 (실제 Judge 동일 로직)
-                    if evaluation == "평가실패":
-                        fb_eval, fb_reason = _classify_from_text(raw)
-                        evaluation = fb_eval
-                        reason = fb_reason
+            yield collector.log("ok", f"Judge API 응답 수신: {len(judge_cases)}건")
 
-                    await db.execute(
-                        "UPDATE case_results SET evaluation=?, reason=? WHERE run_id=? AND case_id=?",
-                        (evaluation, reason, run_id, case["case_id"])
-                    )
-                    await db.commit()
-                    done_count += 1
-                    return evaluation
-                except Exception as e:
-                    done_count += 1
-                    return f"error:{e}"
+            # merged_final.json 의 cases 를 case_id 기준으로 매핑
+            judge_map: dict[str, dict] = {}
+            for jc in judge_cases:
+                cid = str(jc.get("id", ""))
+                if cid:
+                    judge_map[cid] = jc
 
-        pending_tasks = [asyncio.create_task(judge_case(c)) for c in cases]
-        try:
+            unmatched = 0
             processed = 0
-            for coro in asyncio.as_completed(pending_tasks):
-                eval_result = await coro
-                processed += 1
-                if not str(eval_result).startswith("error:"):
-                    yield collector.log("ok", f"판정: {eval_result}")
+            for case in cases:
+                cid = str(case.get("case_id", ""))
+                jc = judge_map.get(cid)
+                if not jc:
+                    evaluation = "평가실패"
+                    reason = "Judge 응답에 해당 id 없음"
+                    unmatched += 1
                 else:
-                    yield collector.log("warn", f"Judge 실패: {eval_result}")
+                    evaluation = jc.get("answer_evaluation") or "평가실패"
+                    reason = jc.get("answer_evaluation_reason") or ""
+
+                await db.execute(
+                    "UPDATE case_results SET evaluation=?, reason=? WHERE run_id=? AND case_id=?",
+                    (evaluation, reason, run_id, case["case_id"])
+                )
+                processed += 1
                 yield progress_event(processed, total)
-        finally:
-            for t in pending_tasks:
-                if not t.done():
-                    t.cancel()
+
+            await db.commit()
+
+            if unmatched:
+                yield collector.log("warn", f"Judge 응답에 매칭되지 않은 id: {unmatched}건 → 평가실패 처리")
+
+            if judge_summary:
+                yield collector.log("info", f"Judge summary: {judge_summary}")
 
         # 점수 집계 (task_type 인지)
         scores = await aggregate_scores(run_id, task_type=task_type)

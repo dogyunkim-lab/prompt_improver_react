@@ -1,9 +1,74 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import json
 import os
 from database import get_db
+
+
+def _normalize_label_list(value: Any) -> Optional[str]:
+    """label_list 입력을 JSON 문자열로 정규화. None이면 None 반환."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return json.dumps([], ensure_ascii=False)
+        # 콤마/줄바꿈 분리도 허용
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return json.dumps([str(x).strip() for x in parsed if str(x).strip()], ensure_ascii=False)
+        except Exception:
+            pass
+        items = [t.strip() for t in s.replace("\n", ",").split(",") if t.strip()]
+        return json.dumps(items, ensure_ascii=False)
+    if isinstance(value, list):
+        return json.dumps([str(x).strip() for x in value if str(x).strip()], ensure_ascii=False)
+    return json.dumps([], ensure_ascii=False)
+
+
+def _decode_task_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """DB row의 label_list/label_definitions JSON 문자열을 list/dict로 파싱."""
+    if "label_list" in row and isinstance(row.get("label_list"), str):
+        try:
+            row["label_list"] = json.loads(row["label_list"])
+        except Exception:
+            row["label_list"] = []
+    if "label_definitions" in row and isinstance(row.get("label_definitions"), str):
+        try:
+            row["label_definitions"] = json.loads(row["label_definitions"])
+        except Exception:
+            row["label_definitions"] = {}
+    return row
+
+
+def _normalize_label_definitions(value: Any) -> Optional[str]:
+    """label_definitions 입력을 JSON 문자열로 정규화."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return json.dumps({}, ensure_ascii=False)
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, dict):
+                return json.dumps({str(k): str(v) for k, v in parsed.items()}, ensure_ascii=False)
+        except Exception:
+            pass
+        # "라벨: 정의" 줄 단위 파싱 폴백
+        defs = {}
+        for line in s.splitlines():
+            if ":" in line:
+                k, v = line.split(":", 1)
+                k, v = k.strip(), v.strip()
+                if k:
+                    defs[k] = v
+        return json.dumps(defs, ensure_ascii=False)
+    if isinstance(value, dict):
+        return json.dumps({str(k): str(v) for k, v in value.items()}, ensure_ascii=False)
+    return json.dumps({}, ensure_ascii=False)
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -33,10 +98,10 @@ class TaskCreate(BaseModel):
     sim_api_base: Optional[str] = None
     sim_api_key: Optional[str] = None
     sim_model: Optional[str] = None
-    judge_api_base: Optional[str] = None
-    judge_api_key: Optional[str] = None
-    judge_model: Optional[str] = None
     anchor_guide_file: Optional[str] = None
+    # Classification 전용
+    label_list: Optional[Any] = None          # list[str] | str(콤마/JSON)
+    label_definitions: Optional[Any] = None   # dict[str,str] | str(JSON/줄단위)
 
 
 @router.get("")
@@ -44,7 +109,7 @@ async def list_tasks():
     db = await get_db()
     try:
         async with db.execute("SELECT * FROM tasks ORDER BY created_at DESC") as cursor:
-            tasks = [dict(row) for row in await cursor.fetchall()]
+            tasks = [_decode_task_row(dict(row)) for row in await cursor.fetchall()]
         for task in tasks:
             async with db.execute(
                 "SELECT id, run_number, status, score_total, start_mode, base_run_id, created_at FROM runs WHERE task_id=? ORDER BY run_number",
@@ -61,14 +126,16 @@ async def create_task(body: TaskCreate):
     db = await get_db()
     try:
         task_type = body.task_type if body.task_type in ("summarization", "classification") else "summarization"
+        label_list_json = _normalize_label_list(body.label_list) if task_type == "classification" else None
+        label_defs_json = _normalize_label_definitions(body.label_definitions) if task_type == "classification" else None
         async with db.execute(
-            "INSERT INTO tasks (name, description, generation_task, task_type, gpt_api_base, gpt_api_key, gpt_model, sim_api_base, sim_api_key, sim_model, judge_api_base, judge_api_key, judge_model, anchor_guide_file) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (body.name, body.description, body.generation_task, task_type, body.gpt_api_base, body.gpt_api_key, body.gpt_model, body.sim_api_base, body.sim_api_key, body.sim_model, body.judge_api_base, body.judge_api_key, body.judge_model, body.anchor_guide_file)
+            "INSERT INTO tasks (name, description, generation_task, task_type, gpt_api_base, gpt_api_key, gpt_model, sim_api_base, sim_api_key, sim_model, anchor_guide_file, label_list, label_definitions) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (body.name, body.description, body.generation_task, task_type, body.gpt_api_base, body.gpt_api_key, body.gpt_model, body.sim_api_base, body.sim_api_key, body.sim_model, body.anchor_guide_file, label_list_json, label_defs_json)
         ) as cursor:
             task_id = cursor.lastrowid
         await db.commit()
         async with db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)) as cursor:
-            return dict(await cursor.fetchone())
+            return _decode_task_row(dict(await cursor.fetchone()))
     finally:
         await db.close()
 
@@ -81,7 +148,7 @@ async def get_task(task_id: int):
             task = await cursor.fetchone()
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        task = dict(task)
+        task = _decode_task_row(dict(task))
         async with db.execute(
             "SELECT * FROM runs WHERE task_id=? ORDER BY run_number",
             (task_id,)
@@ -103,10 +170,9 @@ class TaskUpdate(BaseModel):
     sim_api_base: Optional[str] = None
     sim_api_key: Optional[str] = None
     sim_model: Optional[str] = None
-    judge_api_base: Optional[str] = None
-    judge_api_key: Optional[str] = None
-    judge_model: Optional[str] = None
     anchor_guide_file: Optional[str] = None
+    label_list: Optional[Any] = None
+    label_definitions: Optional[Any] = None
 
 
 @router.patch("/{task_id}")
@@ -149,18 +215,15 @@ async def update_task(task_id: int, body: TaskUpdate):
         if body.sim_model is not None:
             updates.append("sim_model=?")
             values.append(body.sim_model)
-        if body.judge_api_base is not None:
-            updates.append("judge_api_base=?")
-            values.append(body.judge_api_base)
-        if body.judge_api_key is not None:
-            updates.append("judge_api_key=?")
-            values.append(body.judge_api_key)
-        if body.judge_model is not None:
-            updates.append("judge_model=?")
-            values.append(body.judge_model)
         if body.anchor_guide_file is not None:
             updates.append("anchor_guide_file=?")
             values.append(body.anchor_guide_file)
+        if body.label_list is not None:
+            updates.append("label_list=?")
+            values.append(_normalize_label_list(body.label_list))
+        if body.label_definitions is not None:
+            updates.append("label_definitions=?")
+            values.append(_normalize_label_definitions(body.label_definitions))
 
         if updates:
             values.append(task_id)
@@ -168,7 +231,7 @@ async def update_task(task_id: int, body: TaskUpdate):
             await db.commit()
 
         async with db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)) as cursor:
-            return dict(await cursor.fetchone())
+            return _decode_task_row(dict(await cursor.fetchone()))
     finally:
         await db.close()
 

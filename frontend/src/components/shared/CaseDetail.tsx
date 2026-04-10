@@ -36,11 +36,17 @@ export const CaseDetail: React.FC<CaseDetailProps> = ({ row, fields }) => {
       className="h-[320px] overflow-hidden p-2.5 mx-2 mb-2 bg-warm-hover border border-warm-table-border rounded-lg flex flex-nowrap gap-0 text-xs"
     >
       {fields.map((field) => {
-        let value = row[field.key as keyof CaseResult];
+        let value: unknown = row[field.key as keyof CaseResult];
         if (field.key === 'intermediate_outputs' && value && typeof value === 'object') {
           value = Object.entries(value as Record<string, { node: string; content: string }>)
             .map(([k, v]) => `[${v.node}] ${k}:\n${v.content}`)
             .join('\n\n');
+        } else if (Array.isArray(value)) {
+          // 배열은 줄 단위로 표시 (key_signals_in_stt, missed_signals 등)
+          value = value.map((v) => (typeof v === 'string' ? `• ${v}` : `• ${JSON.stringify(v)}`)).join('\n');
+        } else if (value && typeof value === 'object') {
+          // 객체는 JSON으로
+          value = JSON.stringify(value, null, 2);
         }
         return (
           <div

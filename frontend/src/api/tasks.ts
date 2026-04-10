@@ -14,8 +14,9 @@ export function createTask(data: {
   task_type?: 'summarization' | 'classification';
   gpt_api_base?: string; gpt_api_key?: string; gpt_model?: string;
   sim_api_base?: string; sim_api_key?: string; sim_model?: string;
-  judge_api_base?: string; judge_api_key?: string; judge_model?: string;
   anchor_guide_file?: string;
+  label_list?: string[] | string;
+  label_definitions?: Record<string, string> | string;
 }): Promise<Task> {
   return apiFetch<Task>('/api/tasks', {
     method: 'POST',
@@ -29,8 +30,9 @@ export function updateTask(id: number, data: {
   task_type?: 'summarization' | 'classification';
   gpt_api_base?: string; gpt_api_key?: string; gpt_model?: string;
   sim_api_base?: string; sim_api_key?: string; sim_model?: string;
-  judge_api_base?: string; judge_api_key?: string; judge_model?: string;
   anchor_guide_file?: string;
+  label_list?: string[] | string;
+  label_definitions?: Record<string, string> | string;
 }): Promise<Task> {
   return apiFetch<Task>(`/api/tasks/${id}`, {
     method: 'PATCH',

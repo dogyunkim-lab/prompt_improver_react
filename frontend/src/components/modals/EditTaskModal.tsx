@@ -17,14 +17,12 @@ export const EditTaskModal: React.FC = () => {
   const [simBase, setSimBase] = useState('');
   const [simKey, setSimKey] = useState('');
   const [simModel, setSimModel] = useState('');
-  const [judgeBase, setJudgeBase] = useState('');
-  const [judgeKey, setJudgeKey] = useState('');
-  const [judgeModel, setJudgeModel] = useState('');
   const [anchorFile, setAnchorFile] = useState('');
   const [anchorOptions, setAnchorOptions] = useState<{ filename: string; name: string }[]>([]);
+  const [labelListInput, setLabelListInput] = useState('');
+  const [labelDefinitionsInput, setLabelDefinitionsInput] = useState('');
   const [showLLM, setShowLLM] = useState(false);
   const [showSimLLM, setShowSimLLM] = useState(false);
-  const [showJudgeLLM, setShowJudgeLLM] = useState(false);
   const [showAnchor, setShowAnchor] = useState(false);
 
   useEffect(() => {
@@ -45,19 +43,33 @@ export const EditTaskModal: React.FC = () => {
       setSimBase(editingTask.sim_api_base || '');
       setSimKey(editingTask.sim_api_key || '');
       setSimModel(editingTask.sim_model || '');
-      setJudgeBase(editingTask.judge_api_base || '');
-      setJudgeKey(editingTask.judge_api_key || '');
-      setJudgeModel(editingTask.judge_model || '');
       setAnchorFile(editingTask.anchor_guide_file || '');
+      // Classification 라벨 메타데이터 (배열/객체 → 텍스트)
+      if (Array.isArray(editingTask.label_list)) {
+        setLabelListInput(editingTask.label_list.join('\n'));
+      } else {
+        setLabelListInput('');
+      }
+      if (editingTask.label_definitions && typeof editingTask.label_definitions === 'object') {
+        const lines = Object.entries(editingTask.label_definitions)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join('\n');
+        setLabelDefinitionsInput(lines);
+      } else {
+        setLabelDefinitionsInput('');
+      }
       setShowLLM(!!(editingTask.gpt_api_base || editingTask.gpt_api_key || editingTask.gpt_model));
       setShowSimLLM(!!(editingTask.sim_api_base || editingTask.sim_api_key || editingTask.sim_model));
-      setShowJudgeLLM(!!(editingTask.judge_api_base || editingTask.judge_api_key || editingTask.judge_model));
       setShowAnchor(!!editingTask.anchor_guide_file);
     }
   }, [editingTask]);
 
   const onSubmit = useCallback(async () => {
     if (!editingTask || !name.trim()) return;
+    if (taskType === 'classification' && !labelListInput.trim()) {
+      alert('Classification 유형은 [라벨 집합]을 반드시 입력해야 합니다.');
+      return;
+    }
     setSubmitting(true);
     try {
       await updateTask(editingTask.id, {
@@ -70,10 +82,11 @@ export const EditTaskModal: React.FC = () => {
         sim_api_base: simBase.trim(),
         sim_api_key: simKey.trim(),
         sim_model: simModel.trim(),
-        judge_api_base: judgeBase.trim(),
-        judge_api_key: judgeKey.trim(),
-        judge_model: judgeModel.trim(),
         anchor_guide_file: anchorFile || '',
+        ...(taskType === 'classification' ? {
+          label_list: labelListInput.trim(),
+          label_definitions: labelDefinitionsInput.trim(),
+        } : {}),
       });
       closeModal();
     } catch (e) {
@@ -81,7 +94,7 @@ export const EditTaskModal: React.FC = () => {
     } finally {
       setSubmitting(false);
     }
-  }, [editingTask, name, desc, genType, gptBase, gptKey, gptModel, simBase, simKey, simModel, judgeBase, judgeKey, judgeModel, anchorFile, updateTask, closeModal, setSubmitting]);
+  }, [editingTask, name, desc, taskType, genType, gptBase, gptKey, gptModel, simBase, simKey, simModel, anchorFile, labelListInput, labelDefinitionsInput, updateTask, closeModal, setSubmitting]);
 
   return (
     <Modal
@@ -139,6 +152,40 @@ export const EditTaskModal: React.FC = () => {
           Task 유형은 새 실험 생성 시에만 설정할 수 있으며, 이후에는 변경할 수 없습니다.
         </p>
       </div>
+      {taskType === 'classification' && (
+        <>
+          <div className="mb-3.5">
+            <label className="block text-xs text-[#666] mb-1 font-semibold" title="이 분류 Task에서 사용하는 모든 라벨 (정확한 텍스트). 줄바꿈 또는 콤마로 구분합니다. 모델은 반드시 이 집합 안에서만 라벨을 출력해야 합니다.">
+              라벨 집합 * <span className="text-ctp-peach">(분류 전용)</span>
+            </label>
+            <textarea
+              className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-mauve focus:outline-none font-mono resize-y"
+              placeholder={'예) 줄바꿈 또는 콤마로 구분\n민원\n문의\n칭찬\n기타'}
+              rows={4}
+              value={labelListInput}
+              onChange={(e) => setLabelListInput(e.target.value)}
+            />
+            <p className="text-[11px] text-[#888] mt-1">
+              모델이 출력해야 할 라벨의 정확한 텍스트입니다. Phase 1/2의 모든 분석에서 이 집합이 컨텍스트로 사용됩니다.
+            </p>
+          </div>
+          <div className="mb-3.5">
+            <label className="block text-xs text-[#666] mb-1 font-semibold" title="각 라벨의 정의/판정 기준. 한 줄에 '라벨: 정의' 형식 또는 JSON 객체로 입력합니다. 비워두면 라벨 이름만 사용합니다.">
+              라벨 정의 <span className="text-[#888]">(분류 전용, 권장)</span>
+            </label>
+            <textarea
+              className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-mauve focus:outline-none font-mono resize-y"
+              placeholder={'예) 라벨: 정의 형식 또는 JSON\n민원: 환불·취소·이의 제기 등 처리 요구가 명시된 경우\n문의: 단순 정보·이용 방법 등 답변 요청\n칭찬: 만족·감사 표현이 주된 경우\n기타: 위 셋에 해당하지 않는 모든 경우'}
+              rows={6}
+              value={labelDefinitionsInput}
+              onChange={(e) => setLabelDefinitionsInput(e.target.value)}
+            />
+            <p className="text-[11px] text-[#888] mt-1">
+              각 라벨의 변별 기준을 명시하면 Phase 1 진단·Phase 2 전략 설계의 정확도가 크게 향상됩니다.
+            </p>
+          </div>
+        </>
+      )}
       <div className="mb-3.5">
         <label className="block text-xs text-[#666] mb-1 font-semibold" title="이 실험에서 다루는 요약 종류 (예: 민원내용). GPT가 분석 시 참고합니다.">요약 유형</label>
         <input
@@ -224,47 +271,6 @@ export const EditTaskModal: React.FC = () => {
               placeholder="예: qwen3.5-35B-A3B"
               value={simModel}
               onChange={(e) => setSimModel(e.target.value)}
-            />
-          </div>
-        </div>
-      )}
-      <div className="mb-1">
-        <button
-          type="button"
-          className="text-xs text-ctp-blue font-semibold hover:underline"
-          onClick={() => setShowJudgeLLM(!showJudgeLLM)}
-          title="Phase 4 Judge에 사용할 LLM. Judge는 GPT 기준으로 설계되었으므로 GPT 권장. 비워두면 분석 LLM 설정을 사용합니다."
-        >{showJudgeLLM ? '▾ Judge LLM 설정 접기' : '▸ Judge LLM 설정 (Phase 4 — GPT 권장)'}</button>
-      </div>
-      {showJudgeLLM && (
-        <div className="pl-2 border-l-2 border-ctp-blue/30 mb-3.5 space-y-2.5">
-          <p className="text-[11px] text-[#888]">Phase 4 Judge 판정 및 Phase 2 mini-validation 판정에 사용. Judge 프롬프트는 GPT 기준으로 설계되어 있으므로 GPT 계열 권장. 비워두면 분석 LLM 설정으로 폴백합니다.</p>
-          <div>
-            <label className="block text-xs text-[#666] mb-1 font-semibold">API Base URL</label>
-            <input
-              className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-blue focus:outline-none"
-              placeholder="비워두면 분석 LLM 설정 사용"
-              value={judgeBase}
-              onChange={(e) => setJudgeBase(e.target.value)}
-            />
-          </div>
-          <div>
-            <label className="block text-xs text-[#666] mb-1 font-semibold">API Key</label>
-            <input
-              type="password"
-              className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-blue focus:outline-none"
-              placeholder="비워두면 분석 LLM 설정 사용"
-              value={judgeKey}
-              onChange={(e) => setJudgeKey(e.target.value)}
-            />
-          </div>
-          <div>
-            <label className="block text-xs text-[#666] mb-1 font-semibold">모델명</label>
-            <input
-              className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-blue focus:outline-none"
-              placeholder="예: gpt-oss-120b-26"
-              value={judgeModel}
-              onChange={(e) => setJudgeModel(e.target.value)}
             />
           </div>
         </div>

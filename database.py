@@ -181,6 +181,11 @@ async def init_db():
             "ALTER TABLE tasks ADD COLUMN anchor_guide_file TEXT",
             # Task 유형 (summarization | classification) — 기본값 summarization
             "ALTER TABLE tasks ADD COLUMN task_type TEXT DEFAULT 'summarization'",
+            # Classification 라벨 메타데이터 (JSON 문자열)
+            #   label_list:        ["민원","문의",...]
+            #   label_definitions: {"민원":"고객이 불만/이의제기를...","문의":"..."}
+            "ALTER TABLE tasks ADD COLUMN label_list TEXT",
+            "ALTER TABLE tasks ADD COLUMN label_definitions TEXT",
         ]
         for stmt in _migration_stmts:
             try:

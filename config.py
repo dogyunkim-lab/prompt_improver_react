@@ -19,6 +19,15 @@ DIFY_CLIENT_ID     = os.getenv("DIFY_CLIENT_ID", "")
 DIFY_CLIENT_SECRET = os.getenv("DIFY_CLIENT_SECRET", "")
 DIFY_BASE_URL      = os.getenv("DIFY_BASE_URL", "http://내부서버주소/v1")
 
+# LLM Judge API (Phase 4 / Phase 2 mini-validation)
+# - 폐쇄망 LLM Judge 서버. 입력 xlsx → output_dir 에 merged_final.json 생성.
+# - JUDGE_IO_DIR 은 개선툴과 Judge API 서버가 동일하게 접근 가능한 경로여야 함 (공유 마운트 또는 동일 호스트).
+JUDGE_API_URL    = os.getenv("JUDGE_API_URL", "http://10.232.200.25:8000/judge")
+JUDGE_IO_DIR     = os.getenv("JUDGE_IO_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "judge_io"))
+JUDGE_API_MODEL  = os.getenv("JUDGE_API_MODEL", "gpt-oss-120b-25")
+JUDGE_API_WORKERS = int(os.getenv("JUDGE_API_WORKERS", "5"))
+JUDGE_API_TIMEOUT = int(os.getenv("JUDGE_API_TIMEOUT", "3600"))
+
 # 서버
 HOST = "0.0.0.0"
 PORT = 8000

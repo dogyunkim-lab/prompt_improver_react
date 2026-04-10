@@ -12,6 +12,7 @@ import { DataTable, type Column } from '../shared/DataTable';
 import { CaseDetail } from '../shared/CaseDetail';
 import { EvalBarChart } from '../charts/EvalBarChart';
 import { BucketBarChart } from '../charts/BucketBarChart';
+import { ConfusionMatrix } from '../charts/ConfusionMatrix';
 import { uploadJudge, uploadJudgeXLSX, uploadPrompt } from '../../api/uploads';
 import { runPhase, cancelPhase } from '../../api/phases';
 import { downloadJSON, downloadXLSX } from '../../utils/download';
@@ -39,6 +40,31 @@ const P1_COLUMNS: Column[] = [
   { key: 'judge_disagreement', label: 'Judge이견', width: '150px' },
 ];
 
+const P1_COLUMNS_CLASSIFICATION: Column[] = [
+  { key: 'id', label: 'ID', width: '60px', sortable: true },
+  { key: 'evaluation', label: '판정', width: '60px', sortable: true,
+    render: (v) => {
+      const val = String(v || '');
+      const color = val === '오답' ? 'text-score-bad' : val === '정답' ? 'text-score-good' : '';
+      return <span className={cn('font-semibold', color)}>{val}</span>;
+    },
+  },
+  { key: 'confusion_pair', label: '혼동쌍', width: '140px', sortable: true,
+    render: (v) => <span className="font-mono text-[11px]">{String(v || '')}</span>,
+  },
+  { key: 'bucket', label: '오류원인', width: '120px', sortable: true,
+    render: (v) => <span className="text-[11px]">{String(v || '')}</span>,
+  },
+  { key: 'analysis_summary', label: '분석사유', width: '200px' },
+  { key: 'stt', label: 'STT', width: '200px' },
+  { key: 'reference', label: '정답라벨', width: '90px',
+    render: (v) => <span className="font-semibold text-score-good">{String(v || '')}</span>,
+  },
+  { key: 'generated', label: '예측라벨', width: '90px',
+    render: (v) => <span className="font-semibold text-score-bad">{String(v || '')}</span>,
+  },
+];
+
 const DETAIL_FIELDS = [
   { key: 'id', label: 'ID' },
   { key: 'evaluation', label: 'Judge판정' },
@@ -50,6 +76,24 @@ const DETAIL_FIELDS = [
   { key: 'missing_instruction', label: '누락 지시사항' },
   { key: 'violated_instruction', label: '위반 지시사항' },
   { key: 'error_pattern', label: '오류 패턴' },
+  { key: 'improvement_suggestion', label: '개선 제안' },
+];
+
+const DETAIL_FIELDS_CLASSIFICATION = [
+  { key: 'id', label: 'ID' },
+  { key: 'evaluation', label: '판정' },
+  { key: 'confusion_pair', label: '혼동 쌍 (정답→예측)' },
+  { key: 'bucket', label: '오류 원인 (error_cause)' },
+  { key: 'analysis_summary', label: '분석 요약' },
+  { key: 'stt', label: 'STT' },
+  { key: 'reference', label: '정답 라벨 (reference)' },
+  { key: 'generated', label: '예측 라벨 (generated)' },
+  { key: 'boundary_analysis', label: '라벨 경계 분석' },
+  { key: 'key_signals_in_stt', label: '정답 신호어' },
+  { key: 'missed_signals', label: '놓친 신호' },
+  { key: 'overweighted_signals', label: '과대해석 신호' },
+  { key: 'missing_instruction', label: '누락된 지시' },
+  { key: 'violated_instruction', label: '위반된 지시' },
   { key: 'improvement_suggestion', label: '개선 제안' },
 ];
 
@@ -304,28 +348,82 @@ export const Phase1Panel: React.FC = () => {
 
       {/* Charts */}
       <div className="bg-warm-card rounded-[10px] p-4 mb-5 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
-        <h4 className="text-[13px] text-[#555] mb-3" title="Judge 판정(정답/과답/오답)과 오류 원인 버킷의 분포를 시각화합니다">판정 분포</h4>
+        <h4 className="text-[13px] text-[#555] mb-3" title={isClassification ? '정답/오답 분포와 오류 원인(error_cause) 분포를 시각화합니다' : 'Judge 판정(정답/과답/오답)과 오류 원인 버킷의 분포를 시각화합니다'}>판정 분포</h4>
         <div className="flex gap-5 flex-wrap">
           <div className="flex-1 min-w-[200px]">
             <EvalBarChart data={p1EvalChart} />
           </div>
           <div className="flex-1 min-w-[200px]">
-            <h4 className="text-xs text-warm-muted mb-2">오류 원인 분류 (오답/과답 케이스)</h4>
+            <h4 className="text-xs text-warm-muted mb-2">{isClassification ? '오류 원인 (error_cause)' : '오류 원인 분류 (오답/과답 케이스)'}</h4>
             <BucketBarChart data={p1BucketChart} />
           </div>
         </div>
       </div>
 
+      {/* Confusion Matrix (Classification 전용) */}
+      {isClassification && (
+        <div className="bg-warm-card rounded-[10px] p-4 mb-5 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
+          <h4 className="text-[13px] text-[#555] mb-3" title="라벨별 정답/오답 분포 행렬. 행=정답(Reference), 열=모델 예측.">
+            Confusion Matrix
+          </h4>
+          <ConfusionMatrix data={runData?.phases?.[1]?.confusion_matrix} />
+          {runData?.phases?.[1]?.top_confusions && runData.phases[1].top_confusions.length > 0 && (
+            <div className="mt-4">
+              <h5 className="text-xs text-warm-muted mb-2 font-semibold" title="가장 자주 혼동된 라벨 쌍 (Top 10)">자주 혼동된 라벨 쌍 (Top 10)</h5>
+              <div className="flex flex-wrap gap-2">
+                {runData.phases[1].top_confusions.slice(0, 10).map((tc, idx) => (
+                  <span
+                    key={`tc-${idx}`}
+                    className="px-2 py-1 bg-ctp-red/15 text-ctp-red rounded text-[11px] font-mono border border-ctp-red/30"
+                    title={`${tc.pair}: ${tc.count}건 오분류`}
+                  >
+                    {tc.pair} <span className="text-warm-muted">×{tc.count}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {(runData?.phases?.[1]?.recommended_focus || runData?.phases?.[1]?.label_definition_gaps) && (
+            <div className="mt-4 space-y-2 text-[12px]">
+              {runData?.phases?.[1]?.recommended_focus && (
+                <div>
+                  <span className="text-warm-muted font-semibold">권장 개선 방향:</span>{' '}
+                  <span className="text-warm-text">{runData.phases[1].recommended_focus}</span>
+                </div>
+              )}
+              {runData?.phases?.[1]?.label_definition_gaps && (
+                <div>
+                  <span className="text-warm-muted font-semibold">라벨 정의 보완:</span>{' '}
+                  <span className="text-warm-text">{runData.phases[1].label_definition_gaps}</span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Bucket legend */}
       <div className="bg-warm-card rounded-[10px] p-4 mb-5 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
-        <h4 className="text-[13px] text-[#555] mb-3">버킷 설명</h4>
+        <h4 className="text-[13px] text-[#555] mb-3">{isClassification ? 'error_cause 설명' : '버킷 설명'}</h4>
         <div className="grid grid-cols-2 gap-2.5 text-xs leading-relaxed">
-          {[
-            { color: '#f38ba8', name: 'STT 오류', desc: '음성인식(STT) 자체의 오류로 인한 잘못된 입력. 프롬프트 개선으로 해결 불가능한 영역.', title: 'STT 오전사가 원인. 프롬프트로 해결 불가' },
-            { color: '#f9e2af', name: '프롬프트 누락', desc: '프롬프트에 필요한 지시사항이 빠져있거나 불명확하여 발생한 오류.', title: '프롬프트에 지시가 없어서 발생. 프롬프트 개선으로 해결 가능' },
-            { color: '#89b4fa', name: '모델 동작', desc: '프롬프트는 적절하나 모델이 지시를 따르지 못한 경우.', title: '프롬프트 지시는 있지만 모델이 따르지 않음' },
-            { color: '#cba6f7', name: 'Judge 이견', desc: '모델 응답은 적절하나 Judge 판정이 잘못된 것으로 의심되는 케이스.', title: '사람이 보면 맞는데 Judge가 오답으로 판정' },
-          ].map((b) => (
+          {(isClassification
+            ? [
+                { color: '#f38ba8', name: 'label_unknown', desc: '예측 라벨이 라벨 집합에 없음. 스키마 위반.', title: '스키마 위반: 출력 형식 지시 강화 필요' },
+                { color: '#fab387', name: 'boundary_confusion', desc: '두 라벨의 경계가 모호한 케이스. 정의 자체가 변별력이 부족함.', title: '라벨 정의/변별 규칙 강화 필요' },
+                { color: '#f9e2af', name: 'signal_missed', desc: 'STT에 정답 라벨을 가리키는 결정적 신호가 있는데 모델이 놓침.', title: '신호어 가이드 추가 필요' },
+                { color: '#94e2d5', name: 'signal_overweight', desc: 'STT의 부수적 키워드를 과대해석하여 잘못된 라벨 선택.', title: '과대해석 방지 가이드 필요' },
+                { color: '#89b4fa', name: 'definition_gap', desc: '프롬프트에 해당 라벨의 정의/판정 기준이 빠져있거나 모호함.', title: '라벨 정의를 프롬프트에 추가' },
+                { color: '#cba6f7', name: 'prompt_missing', desc: '분류에 필요한 가이드(예시, 우선순위 규칙 등)가 부족함.', title: '예시/우선순위 규칙 추가' },
+                { color: '#74c7ec', name: 'model_behavior', desc: '프롬프트에 명시된 지시를 모델이 무시함.', title: '지시 강조/구조 조정 필요' },
+                { color: '#7f849c', name: 'data_noise', desc: 'STT가 끊기거나 오전사가 심해 사람도 판단하기 어려움.', title: '프롬프트 개선으로 해결 불가' },
+              ]
+            : [
+                { color: '#f38ba8', name: 'STT 오류', desc: '음성인식(STT) 자체의 오류로 인한 잘못된 입력. 프롬프트 개선으로 해결 불가능한 영역.', title: 'STT 오전사가 원인. 프롬프트로 해결 불가' },
+                { color: '#f9e2af', name: '프롬프트 누락', desc: '프롬프트에 필요한 지시사항이 빠져있거나 불명확하여 발생한 오류.', title: '프롬프트에 지시가 없어서 발생. 프롬프트 개선으로 해결 가능' },
+                { color: '#89b4fa', name: '모델 동작', desc: '프롬프트는 적절하나 모델이 지시를 따르지 못한 경우.', title: '프롬프트 지시는 있지만 모델이 따르지 않음' },
+                { color: '#cba6f7', name: 'Judge 이견', desc: '모델 응답은 적절하나 Judge 판정이 잘못된 것으로 의심되는 케이스.', title: '사람이 보면 맞는데 Judge가 오답으로 판정' },
+              ]
+          ).map((b) => (
             <div key={b.name} title={b.title}>
               <span className="inline-block w-2.5 h-2.5 rounded-sm mr-1.5 align-middle" style={{ background: b.color }} />
               <strong>{b.name}</strong><br />
@@ -347,13 +445,13 @@ export const Phase1Panel: React.FC = () => {
             title="분석 결과를 파일로 다운로드합니다">XLSX ⬇</button>
         </div>
         <DataTable
-          columns={P1_COLUMNS}
+          columns={isClassification ? P1_COLUMNS_CLASSIFICATION : P1_COLUMNS}
           data={filtered as CaseResult[]}
           sort={p1Sort}
           filter={p1Filter}
           onSort={toggleSort}
           onFilter={setCol}
-          renderDetail={(row) => <CaseDetail row={row} fields={DETAIL_FIELDS} />}
+          renderDetail={(row) => <CaseDetail row={row} fields={isClassification ? DETAIL_FIELDS_CLASSIFICATION : DETAIL_FIELDS} />}
           rowClassName={(row) =>
             row.evaluation === '오답' ? 'bg-ctp-red/10' : row.evaluation === '과답' ? 'bg-ctp-yellow/20' : ''
           }

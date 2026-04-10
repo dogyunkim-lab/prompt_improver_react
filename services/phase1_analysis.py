@@ -4,16 +4,40 @@ import os
 from datetime import datetime
 from typing import AsyncGenerator
 from database import get_db
-from services.gpt_client import call_gpt, get_task_gpt_config
+from services.gpt_client import call_gpt, get_task_gpt_config, get_task_type, get_task_labels
+from services.phase4_judge import _exact_match_classify
 from services.sse_helpers import log_event, progress_event, result_event, done_event, case_event, LogCollector
 
 PROMPT_PATH = "prompts/phase1_analysis.txt"
+PROMPT_PATH_CLASSIFICATION = "prompts/phase1_analysis_classification.txt"
 CONCURRENT = 5   # 동시 GPT 호출 수
 
 
 def load_prompt() -> str:
     with open(PROMPT_PATH, "r", encoding="utf-8") as f:
         return f.read()
+
+
+def load_prompt_classification() -> str:
+    with open(PROMPT_PATH_CLASSIFICATION, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _format_label_list(labels: list) -> str:
+    """라벨 리스트를 프롬프트 삽입용 문자열로."""
+    if not labels:
+        return "(라벨 집합 미지정)"
+    return "[" + ", ".join(f'"{l}"' for l in labels) + "]"
+
+
+def _format_label_definitions(defs: dict) -> str:
+    """라벨 정의 dict를 프롬프트 삽입용 텍스트로."""
+    if not defs:
+        return "(라벨 정의 미지정)"
+    lines = []
+    for k, v in defs.items():
+        lines.append(f'- "{k}": {v}')
+    return "\n".join(lines)
 
 
 def _detect_eval_field(cases: list) -> str:
@@ -36,6 +60,33 @@ def _detect_reason_field(cases: list) -> str:
         if any(isinstance(c.get(field), str) and c.get(field, "").strip() for c in cases[:10]):
             return field
     return "reason"
+
+
+async def _call_gpt_case_classification(
+    case: dict, prompt_template: str,
+    label_list_text: str, label_defs_text: str,
+    current_prompt: str = "", generation_task: str = "",
+    intermediate_outputs: str = "",
+    gpt_config: dict | None = None,
+    reasoning: str = "high",
+) -> dict:
+    """분류 케이스 단일 분석. DB 조작 없음."""
+    case_prompt = prompt_template.format(
+        stt=case.get("stt", ""),
+        reference=case.get("reference", ""),
+        keywords=case.get("keywords", ""),
+        generated=case.get("generated", ""),
+        case_id=case.get("id", ""),
+        current_prompt=current_prompt,
+        generation_task=generation_task,
+        intermediate_outputs=intermediate_outputs or "(중간 출력 없음)",
+        label_list=label_list_text,
+        label_definitions=label_defs_text,
+    )
+    raw = await call_gpt([{"role": "user", "content": case_prompt}], reasoning=reasoning, **(gpt_config or {}))
+    result = _extract_json(raw)
+    result["case_id"] = str(case.get("id", ""))
+    return result
 
 
 async def _call_gpt_case(case: dict, prompt_template: str, eval_field: str, reason_field: str,
@@ -73,6 +124,15 @@ async def run_phase1(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
         async with db.execute("SELECT * FROM tasks WHERE id=?", (run["task_id"],)) as cursor:
             task = dict(await cursor.fetchone())
         generation_task = task.get("generation_task", "")
+
+        # Task 유형 + 분류 라벨 메타데이터
+        task_type = await get_task_type(run_id)
+        is_classification = task_type == "classification"
+        labels_meta = await get_task_labels(run_id) if is_classification else {"label_list": [], "label_definitions": {}}
+        label_list = labels_meta.get("label_list", [])
+        label_defs = labels_meta.get("label_definitions", {})
+        label_list_text = _format_label_list(label_list)
+        label_defs_text = _format_label_definitions(label_defs)
 
         # 실험별 GPT 설정 로드
         gpt_config = await get_task_gpt_config(run_id)
@@ -137,17 +197,31 @@ async def run_phase1(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
 
         yield collector.log("info", f"감지된 필드: {list(judge_data[0].keys())}")
 
-        # 판정/사유 필드명 자동 감지
-        eval_field = _detect_eval_field(judge_data)
-        reason_field = _detect_reason_field(judge_data)
+        # ── Task 유형별 판정 필드 결정 ────────────────────────────────────────
+        if is_classification:
+            yield collector.log("info", f"Task 유형: classification — 라벨 {len(label_list)}개")
+            if not label_list:
+                yield collector.log("warn", "라벨 집합(label_list)이 등록되지 않았습니다. Task 설정에서 라벨을 입력하세요.")
+            # 분류는 LLM Judge가 아닌 텍스트 일치로 판정 → 모든 케이스에 evaluation 채워넣음
+            for c in judge_data:
+                ev, rs = _exact_match_classify(c.get("reference", ""), c.get("generated", ""))
+                c["__cls_eval__"] = ev
+                c["__cls_reason__"] = rs
+            eval_field = "__cls_eval__"
+            reason_field = "__cls_reason__"
+        else:
+            # 판정/사유 필드명 자동 감지
+            eval_field = _detect_eval_field(judge_data)
+            reason_field = _detect_reason_field(judge_data)
         yield collector.log("info", f"판정 필드: '{eval_field}' | 사유 필드: '{reason_field}'")
 
-        # 오답/과답 케이스 추출
-        error_cases = [c for c in judge_data if c.get(eval_field) in ("오답", "과답")]
+        # 오답/과답 케이스 추출 (분류는 과답 개념 없음 → 오답만)
+        error_values = ("오답",) if is_classification else ("오답", "과답")
+        error_cases = [c for c in judge_data if c.get(eval_field) in error_values]
         total_cases = len(judge_data)
         error_count = len(error_cases)
 
-        yield collector.log("info", f"전체 {total_cases}건 중 오답/과답 {error_count}건 분석 시작")
+        yield collector.log("info", f"전체 {total_cases}건 중 오답 {error_count}건 분석 시작")
 
         # 재실행 시 기존 케이스 데이터 삭제 (이전 파일 데이터가 남지 않도록)
         await db.execute("DELETE FROM case_results WHERE run_id=?", (run_id,))
@@ -170,7 +244,7 @@ async def run_phase1(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
 
         # 정답 케이스 즉시 스트리밍 (GPT 분석 불필요)
         for case in judge_data:
-            if case.get(eval_field) not in ("오답", "과답"):
+            if case.get(eval_field) not in error_values:
                 yield case_event({
                     "id": str(case.get("id", "")),
                     "judge": case.get(eval_field, ""),
@@ -185,13 +259,14 @@ async def run_phase1(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                 })
 
         if error_count == 0:
-            yield collector.log("ok", "오답/과답 케이스가 없습니다. Phase 1 완료.")
+            yield collector.log("ok", "오류 케이스가 없습니다. Phase 1 완료.")
             correct_count = sum(1 for c in judge_data if c.get(eval_field) == "정답")
             over_count    = sum(1 for c in judge_data if c.get(eval_field) == "과답")
             wrong_count   = sum(1 for c in judge_data if c.get(eval_field) == "오답")
             zero_summary = {
                 "bucket_counts": {}, "top_issues": [], "prompt_improvable_cases": [],
                 "judge_dispute_cases": [], "recommended_focus": "오류 케이스 없음",
+                "task_type": task_type,
                 "scores": {
                     "correct_plus_over": round((correct_count + over_count) / total_cases * 100, 1) if total_cases else 0,
                     "correct": round(correct_count / total_cases * 100, 1) if total_cases else 0,
@@ -203,14 +278,19 @@ async def run_phase1(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                     "wrong_count": wrong_count,
                 },
                 "eval_chart": {
-                    "labels": ["정답", "과답", "오답"],
-                    "values": [correct_count, over_count, wrong_count],
+                    "labels": ["정답", "오답"] if is_classification else ["정답", "과답", "오답"],
+                    "values": [correct_count, wrong_count] if is_classification else [correct_count, over_count, wrong_count],
                 },
                 "bucket_chart": {
                     "labels": ["STT 오류", "프롬프트 누락", "모델 동작", "Judge 이견"],
                     "values": [0, 0, 0, 0],
                 },
             }
+            if is_classification:
+                zero_summary["confusion_matrix"] = {"labels": label_list, "matrix": []}
+                zero_summary["top_confusions"] = []
+                zero_summary["error_cause_counts"] = {}
+                zero_summary["schema_violation_count"] = 0
             await _mark_phase_completed(run_id, 1, zero_summary)
             await db.execute("UPDATE phase_results SET log_text=? WHERE run_id=? AND phase=1",
                              (collector.get_text(), run_id))
@@ -219,7 +299,7 @@ async def run_phase1(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
             yield done_event("completed")
             return
 
-        prompt_template = load_prompt()
+        prompt_template = load_prompt_classification() if is_classification else load_prompt()
         case_analyses = []
         sem = asyncio.Semaphore(CONCURRENT)
 
@@ -242,6 +322,17 @@ async def run_phase1(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
             async with sem:
                 # 이전 Run의 중간 출력 첨부
                 case_intermediate = prev_intermediate_map.get(str(c.get("id", "")), "")
+                if is_classification:
+                    return await _call_gpt_case_classification(
+                        c, prompt_template,
+                        label_list_text=label_list_text,
+                        label_defs_text=label_defs_text,
+                        current_prompt=current_prompt,
+                        generation_task=generation_task,
+                        intermediate_outputs=case_intermediate,
+                        gpt_config=gpt_config,
+                        reasoning=reasoning,
+                    )
                 return await _call_gpt_case(c, prompt_template, eval_field, reason_field,
                                             current_prompt=current_prompt,
                                             generation_task=generation_task,
@@ -264,10 +355,24 @@ async def run_phase1(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                 done_count += 1
                 if isinstance(outcome, Exception):
                     yield collector.log("warn", f"케이스 {case.get('id', '?')} 분석 실패: {outcome}")
-                    result = {"case_id": str(case.get("id", "")), "bucket": "prompt_missing",
-                              "analysis_summary": "", "stt_uncertain_expressions": [],
-                              "hallucination_detected": False, "judge_agreement": True,
-                              "judge_dispute_reason": ""}
+                    if is_classification:
+                        result = {
+                            "case_id": str(case.get("id", "")),
+                            "error_cause": "prompt_missing",
+                            "analysis_summary": "",
+                            "key_signals_in_stt": [],
+                            "missed_signals": [],
+                            "overweighted_signals": [],
+                            "label_in_schema": True,
+                            "ref_label": case.get("reference", ""),
+                            "pred_label": case.get("generated", ""),
+                            "confusion_pair": f"{case.get('reference','')}→{case.get('generated','')}",
+                        }
+                    else:
+                        result = {"case_id": str(case.get("id", "")), "bucket": "prompt_missing",
+                                  "analysis_summary": "", "stt_uncertain_expressions": [],
+                                  "hallucination_detected": False, "judge_agreement": True,
+                                  "judge_dispute_reason": ""}
                 else:
                     result = outcome
 
@@ -280,15 +385,22 @@ async def run_phase1(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                 if not result.get("judge_agreement", True):
                     judge_disagree = result.get("judge_dispute_reason", "")
 
-                # 새 분석 필드
+                # 공통 분석 필드
                 missing_instruction = result.get("missing_instruction", "")
                 violated_instruction = result.get("violated_instruction", "")
-                error_pattern = result.get("error_pattern", "")
                 improvement_suggestion = result.get("improvement_suggestion", "")
 
-                # Reference 요약 기준 분석 필드
-                reference_criteria = result.get("reference_criteria", "")
-                content_gap = result.get("content_gap", "")
+                if is_classification:
+                    # 분류 전용: bucket 컬럼에 error_cause를 저장 (UI 호환)
+                    bucket_for_db = result.get("error_cause", "")
+                    error_pattern = result.get("confusion_pair", "")
+                    reference_criteria = ""  # 분류에서 미사용
+                    content_gap = result.get("boundary_analysis", "")
+                else:
+                    bucket_for_db = result.get("bucket", "")
+                    error_pattern = result.get("error_pattern", "")
+                    reference_criteria = result.get("reference_criteria", "")
+                    content_gap = result.get("content_gap", "")
 
                 # ── DB 저장 (확장 필드 포함) ──
                 await db.execute(
@@ -299,7 +411,7 @@ async def run_phase1(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                            error_pattern=?, improvement_suggestion=?,
                            reference_criteria=?, content_gap=?
                        WHERE run_id=? AND case_id=?""",
-                    (result.get("bucket", ""),
+                    (bucket_for_db,
                      result.get("analysis_summary", ""),
                      stt_uncertain_str,
                      1 if result.get("hallucination_detected") else 0,
@@ -321,42 +433,82 @@ async def run_phase1(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                 result["_judge_evaluation"] = case.get(eval_field, "")
                 case_analyses.append(result)
 
-                bucket_label = result.get("bucket", "unknown")
-                secondary = result.get("secondary_bucket")
-                if secondary:
-                    bucket_label += f"+{secondary}"
-                yield collector.log("ok", f"케이스 {case.get('id', '?')} → {bucket_label}")
-                yield case_event({
-                    "id": str(case.get("id", "")),
-                    "judge": case.get(eval_field, ""),
-                    "bucket": result.get("bucket", ""),
-                    "secondary_bucket": result.get("secondary_bucket", ""),
-                    "analysis_summary": result.get("analysis_summary", ""),
-                    "stt_uncertain": stt_uncertain_str,
-                    "stt": case.get("stt", ""),
-                    "reference": case.get("reference", ""),
-                    "generated": case.get("generated", ""),
-                    "judge_disagreement": judge_disagree or case.get(reason_field, ""),
-                    "hallucination": bool(result.get("hallucination_detected", False)),
-                    "hallucination_detail": result.get("hallucination_detail", ""),
-                    "missing_instruction": missing_instruction,
-                    "violated_instruction": violated_instruction,
-                    "error_pattern": error_pattern,
-                    "improvement_suggestion": improvement_suggestion,
-                })
+                if is_classification:
+                    label_for_log = result.get("error_cause", "unknown")
+                    sec = result.get("secondary_cause")
+                    if sec:
+                        label_for_log += f"+{sec}"
+                    yield collector.log("ok", f"케이스 {case.get('id', '?')} → {label_for_log} ({result.get('confusion_pair','')})")
+                    yield case_event({
+                        "id": str(case.get("id", "")),
+                        "judge": case.get(eval_field, ""),
+                        "bucket": bucket_for_db,
+                        "secondary_bucket": result.get("secondary_cause", ""),
+                        "analysis_summary": result.get("analysis_summary", ""),
+                        "stt_uncertain": stt_uncertain_str,
+                        "stt": case.get("stt", ""),
+                        "reference": case.get("reference", ""),
+                        "generated": case.get("generated", ""),
+                        "judge_disagreement": judge_disagree or case.get(reason_field, ""),
+                        "hallucination": False,
+                        "missing_instruction": missing_instruction,
+                        "violated_instruction": violated_instruction,
+                        "error_pattern": error_pattern,
+                        "improvement_suggestion": improvement_suggestion,
+                        # 분류 전용 필드
+                        "ref_label": result.get("ref_label", case.get("reference", "")),
+                        "pred_label": result.get("pred_label", case.get("generated", "")),
+                        "confusion_pair": result.get("confusion_pair", ""),
+                        "label_in_schema": result.get("label_in_schema", True),
+                        "boundary_analysis": result.get("boundary_analysis", ""),
+                    })
+                else:
+                    bucket_label = result.get("bucket", "unknown")
+                    secondary = result.get("secondary_bucket")
+                    if secondary:
+                        bucket_label += f"+{secondary}"
+                    yield collector.log("ok", f"케이스 {case.get('id', '?')} → {bucket_label}")
+                    yield case_event({
+                        "id": str(case.get("id", "")),
+                        "judge": case.get(eval_field, ""),
+                        "bucket": result.get("bucket", ""),
+                        "secondary_bucket": result.get("secondary_bucket", ""),
+                        "analysis_summary": result.get("analysis_summary", ""),
+                        "stt_uncertain": stt_uncertain_str,
+                        "stt": case.get("stt", ""),
+                        "reference": case.get("reference", ""),
+                        "generated": case.get("generated", ""),
+                        "judge_disagreement": judge_disagree or case.get(reason_field, ""),
+                        "hallucination": bool(result.get("hallucination_detected", False)),
+                        "hallucination_detail": result.get("hallucination_detail", ""),
+                        "missing_instruction": missing_instruction,
+                        "violated_instruction": violated_instruction,
+                        "error_pattern": error_pattern,
+                        "improvement_suggestion": improvement_suggestion,
+                    })
 
             await db.commit()
             yield progress_event(done_count, error_count)
 
         # ── 전체 패턴 요약 ────────────────────────────────────────────────────
         yield collector.log("info", "전체 패턴 요약 생성 중...")
-        summary = await _summarize_all(case_analyses, error_count, gpt_config=gpt_config, reasoning=reasoning)
+        if is_classification:
+            summary = await _summarize_all_classification(
+                case_analyses, error_count,
+                label_list=label_list,
+                label_defs=label_defs,
+                gpt_config=gpt_config,
+                reasoning=reasoning,
+            )
+        else:
+            summary = await _summarize_all(case_analyses, error_count, gpt_config=gpt_config, reasoning=reasoning)
         yield collector.log("ok", f"분석 완료 — 주요 이슈: {', '.join(summary.get('top_issues', []))}")
 
         # baseline 점수 추가
         correct_count = sum(1 for c in judge_data if c.get(eval_field) == "정답")
         over_count    = sum(1 for c in judge_data if c.get(eval_field) == "과답")
         wrong_count   = sum(1 for c in judge_data if c.get(eval_field) == "오답")
+        summary["task_type"] = task_type
         summary["scores"] = {
             "correct_plus_over": round((correct_count + over_count) / total_cases * 100, 1) if total_cases else 0,
             "correct": round(correct_count / total_cases * 100, 1) if total_cases else 0,
@@ -368,22 +520,42 @@ async def run_phase1(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
             "wrong_count": wrong_count,
         }
 
-        # 판정 분포 차트 (정답/과답/오답 raw count)
-        summary["eval_chart"] = {
-            "labels": ["정답", "과답", "오답"],
-            "values": [correct_count, over_count, wrong_count],
-        }
-
-        bucket_counts = summary.get("bucket_counts", {})
-        summary["bucket_chart"] = {
-            "labels": ["STT 오류", "프롬프트 누락", "모델 동작", "Judge 이견"],
-            "values": [
-                bucket_counts.get("stt_error", 0),
-                bucket_counts.get("prompt_missing", 0),
-                bucket_counts.get("model_behavior", 0),
-                bucket_counts.get("judge_dispute", 0),
-            ],
-        }
+        # 판정 분포 차트
+        if is_classification:
+            summary["eval_chart"] = {
+                "labels": ["정답", "오답"],
+                "values": [correct_count, wrong_count],
+            }
+            # 분류는 bucket_chart 대신 error_cause_chart 사용
+            ec_counts = summary.get("error_cause_counts", {})
+            summary["bucket_chart"] = {
+                "labels": ["스키마 위반", "경계 혼동", "신호 누락", "신호 과대", "정의 부족", "프롬프트 부족", "모델 행동", "데이터 노이즈"],
+                "values": [
+                    ec_counts.get("label_unknown", 0),
+                    ec_counts.get("boundary_confusion", 0),
+                    ec_counts.get("signal_missed", 0),
+                    ec_counts.get("signal_overweight", 0),
+                    ec_counts.get("definition_gap", 0),
+                    ec_counts.get("prompt_missing", 0),
+                    ec_counts.get("model_behavior", 0),
+                    ec_counts.get("data_noise", 0),
+                ],
+            }
+        else:
+            summary["eval_chart"] = {
+                "labels": ["정답", "과답", "오답"],
+                "values": [correct_count, over_count, wrong_count],
+            }
+            bucket_counts = summary.get("bucket_counts", {})
+            summary["bucket_chart"] = {
+                "labels": ["STT 오류", "프롬프트 누락", "모델 동작", "Judge 이견"],
+                "values": [
+                    bucket_counts.get("stt_error", 0),
+                    bucket_counts.get("prompt_missing", 0),
+                    bucket_counts.get("model_behavior", 0),
+                    bucket_counts.get("judge_dispute", 0),
+                ],
+            }
 
         await _mark_phase_completed(run_id, 1, summary)
         await db.execute("UPDATE phase_results SET log_text=? WHERE run_id=? AND phase=1",
@@ -559,6 +731,171 @@ async def _summarize_all(case_analyses: list, n: int, gpt_config: dict | None = 
         "recommended_focus": recommended_focus,
         "reference_summary_criteria": reference_summary_criteria,
         "common_content_gaps": common_content_gaps,
+    }
+
+
+async def _summarize_all_classification(
+    case_analyses: list, n: int,
+    label_list: list, label_defs: dict,
+    gpt_config: dict | None = None, reasoning: str = "high",
+) -> dict:
+    """분류 전용 집계: confusion matrix, error_cause 분포, 신호 패턴, GPT 정성 요약."""
+    # ── 직접 집계 ──────────────────────────────────────────────────────────────
+    error_cause_counts: dict = {}
+    confusion_counter: dict = {}      # "ref→pred" → count
+    schema_violation_count = 0
+    missed_signal_pool: list = []
+    overweight_signal_pool: list = []
+    prompt_improvable: list = []
+
+    # confusion matrix 초기화 (label_list 순서 기준)
+    label_idx = {l: i for i, l in enumerate(label_list)}
+    n_labels = len(label_list)
+    matrix = [[0 for _ in range(n_labels)] for _ in range(n_labels)] if n_labels else []
+
+    for a in case_analyses:
+        cause = a.get("error_cause", "")
+        if cause:
+            error_cause_counts[cause] = error_cause_counts.get(cause, 0) + 1
+        sec = a.get("secondary_cause")
+        if sec:
+            error_cause_counts[sec] = error_cause_counts.get(sec, 0) + 0.5
+
+        if a.get("label_in_schema") is False:
+            schema_violation_count += 1
+
+        ref_label = a.get("ref_label", "") or a.get("_reference", "")
+        pred_label = a.get("pred_label", "") or a.get("_generated", "")
+        if ref_label and pred_label:
+            key = f"{ref_label}→{pred_label}"
+            confusion_counter[key] = confusion_counter.get(key, 0) + 1
+            # confusion matrix 채우기 (라벨 집합 안에 있는 경우만)
+            if ref_label in label_idx and pred_label in label_idx:
+                matrix[label_idx[ref_label]][label_idx[pred_label]] += 1
+
+        # 신호 풀
+        ms = a.get("missed_signals", [])
+        if isinstance(ms, list):
+            missed_signal_pool.extend([str(s) for s in ms if s])
+        ows = a.get("overweighted_signals", [])
+        if isinstance(ows, list):
+            overweight_signal_pool.extend([str(s) for s in ows if s])
+
+        # 프롬프트로 개선 가능한 케이스 (data_noise/label_unknown 제외)
+        if cause not in ("data_noise",):
+            prompt_improvable.append({
+                "case_id": a.get("case_id", ""),
+                "bucket": cause,                       # phase2 호환용
+                "secondary_bucket": a.get("secondary_cause"),
+                "ref_label": ref_label,
+                "pred_label": pred_label,
+                "confusion_pair": a.get("confusion_pair", f"{ref_label}→{pred_label}"),
+                "error_cause": cause,
+                "label_in_schema": a.get("label_in_schema", True),
+                "key_signals_in_stt": a.get("key_signals_in_stt", []),
+                "missed_signals": a.get("missed_signals", []),
+                "overweighted_signals": a.get("overweighted_signals", []),
+                "boundary_analysis": a.get("boundary_analysis", ""),
+                "missing_instruction": a.get("missing_instruction", ""),
+                "violated_instruction": a.get("violated_instruction", ""),
+                "improvement_suggestion": a.get("improvement_suggestion", ""),
+                "analysis_summary": a.get("analysis_summary", ""),
+                "stt": a.get("_stt", ""),
+                "reference": a.get("_reference", ""),
+                "generated": a.get("_generated", ""),
+                # phase2 호환 필드
+                "error_pattern": a.get("confusion_pair", f"{ref_label}→{pred_label}"),
+            })
+
+    # error_cause_counts 정수화
+    error_cause_counts = {k: round(v) for k, v in error_cause_counts.items()}
+
+    # 혼동 쌍 빈도순
+    top_confusions = sorted(
+        [{"pair": k, "count": v} for k, v in confusion_counter.items()],
+        key=lambda x: x["count"], reverse=True,
+    )
+
+    # 빈도 기반 신호 풀 상위
+    def _top_freq(items: list, k: int = 10) -> list:
+        from collections import Counter
+        c = Counter(items)
+        return [{"text": t, "count": cnt} for t, cnt in c.most_common(k)]
+
+    missed_signals_top = _top_freq(missed_signal_pool, 10)
+    overweighted_signals_top = _top_freq(overweight_signal_pool, 10)
+
+    # ── GPT: 정성적 요약 ───────────────────────────────────────────────────────
+    analyses_for_gpt = []
+    for a in case_analyses:
+        filtered = {k: v for k, v in a.items() if not k.startswith("_")}
+        analyses_for_gpt.append(filtered)
+    analyses_text = json.dumps(analyses_for_gpt, ensure_ascii=False, indent=2)
+
+    label_list_text = "[" + ", ".join(f'"{l}"' for l in label_list) + "]" if label_list else "(미지정)"
+    label_defs_text = "\n".join(f'- "{k}": {v}' for k, v in label_defs.items()) if label_defs else "(미지정)"
+
+    top_confusions_text = "\n".join(f"- {x['pair']}: {x['count']}건" for x in top_confusions[:10]) or "(없음)"
+    missed_signals_text = "\n".join(f"- {x['text']} ({x['count']}회)" for x in missed_signals_top[:10]) or "(없음)"
+    overweight_signals_text = "\n".join(f"- {x['text']} ({x['count']}회)" for x in overweighted_signals_top[:10]) or "(없음)"
+
+    prompt = f"""아래는 분류(classification) 오답 케이스 {n}개의 분석 데이터다.
+이를 바탕으로 다음 JSON만 출력하라 (설명 없이 JSON만):
+{{
+  "top_issues": ["가장 자주 발생하는 분류 오류 패턴 1", "패턴 2", "패턴 3"],
+  "recommended_focus": "Phase 2 프롬프트 개선 시 가장 중요하게 다뤄야 할 방향. 어떤 혼동 쌍을 해결해야 하는지, 어떤 신호 가이드를 추가해야 하는지를 포함하여 4~6문장으로 작성하라.",
+  "label_definition_gaps": "라벨 정의 자체가 모호하거나 부족해 보이는 라벨들을 지목하고, 어떤 변별 기준이 추가되어야 하는지 2~4문장으로 정리하라."
+}}
+
+[라벨 집합]
+{label_list_text}
+
+[라벨 정의]
+{label_defs_text}
+
+[혼동 쌍 빈도]
+{top_confusions_text}
+
+[자주 놓친 신호]
+{missed_signals_text}
+
+[자주 과대해석된 신호]
+{overweight_signals_text}
+
+[케이스별 분석 데이터]
+{analyses_text}"""
+
+    top_issues = []
+    recommended_focus = ""
+    label_definition_gaps = ""
+    try:
+        raw = await call_gpt([{"role": "user", "content": prompt}], reasoning=reasoning, **(gpt_config or {}))
+        gpt = _extract_json(raw)
+        top_issues = gpt.get("top_issues", [])
+        recommended_focus = gpt.get("recommended_focus", "")
+        label_definition_gaps = gpt.get("label_definition_gaps", "")
+    except Exception:
+        top_issues = [x["pair"] for x in top_confusions[:3]]
+        recommended_focus = "혼동 라벨 쌍의 변별 규칙 강화 필요"
+
+    return {
+        "task_type": "classification",
+        "label_list": label_list,
+        "label_definitions": label_defs,
+        # Phase 2 공통 필드 호환 (bucket_counts → error_cause_counts 매핑)
+        "bucket_counts": error_cause_counts,
+        "error_cause_counts": error_cause_counts,
+        "error_pattern_ranking": [{"pattern": x["pair"], "count": x["count"], "case_ids": []} for x in top_confusions[:10]],
+        "top_confusions": top_confusions,
+        "confusion_matrix": {"labels": label_list, "matrix": matrix},
+        "schema_violation_count": schema_violation_count,
+        "missed_signals": missed_signals_top,
+        "overweighted_signals": overweighted_signals_top,
+        "top_issues": top_issues,
+        "recommended_focus": recommended_focus,
+        "label_definition_gaps": label_definition_gaps,
+        "prompt_improvable_cases": prompt_improvable,
+        "judge_dispute_cases": [],   # 분류는 judge_dispute 없음
     }
 
 

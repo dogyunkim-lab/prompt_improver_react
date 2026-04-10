@@ -90,37 +90,6 @@ async def get_task_gpt_config(run_id: int) -> dict:
         await db.close()
 
 
-async def get_task_judge_config(run_id: int) -> dict:
-    """run_id에서 task의 Judge(Phase 4) LLM 설정 조회.
-    judge_* 필드가 비어있으면 gpt_* 설정으로 폴백."""
-    from database import get_db
-    db = await get_db()
-    try:
-        async with db.execute(
-            """SELECT t.judge_api_base, t.judge_api_key, t.judge_model,
-                      t.gpt_api_base, t.gpt_api_key, t.gpt_model
-               FROM runs r JOIN tasks t ON t.id = r.task_id
-               WHERE r.id=?""",
-            (run_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-        if not row:
-            return {}
-        cfg = {}
-        api_base = row["judge_api_base"] or row["gpt_api_base"]
-        api_key = row["judge_api_key"] or row["gpt_api_key"]
-        model = row["judge_model"] or row["gpt_model"]
-        if api_base:
-            cfg["api_base"] = api_base
-        if api_key:
-            cfg["api_key"] = api_key
-        if model:
-            cfg["model"] = model
-        return cfg
-    finally:
-        await db.close()
-
-
 async def get_task_type(run_id: int) -> str:
     """run_id에서 task의 task_type 조회. 기본값은 'summarization'."""
     from database import get_db
@@ -137,6 +106,47 @@ async def get_task_type(run_id: int) -> str:
         if tt in ("summarization", "classification"):
             return tt
         return "summarization"
+    finally:
+        await db.close()
+
+
+async def get_task_labels(run_id: int) -> dict:
+    """run_id에서 task의 classification 라벨 메타데이터 조회.
+    Returns: {"label_list": [..], "label_definitions": {..}}
+    값이 없거나 파싱 실패 시 빈 list/dict 반환.
+    """
+    import json as _json
+    from database import get_db
+    db = await get_db()
+    try:
+        async with db.execute(
+            """SELECT t.label_list, t.label_definitions
+               FROM runs r JOIN tasks t ON t.id = r.task_id
+               WHERE r.id=?""",
+            (run_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return {"label_list": [], "label_definitions": {}}
+        labels = []
+        defs = {}
+        try:
+            ll = row["label_list"] if "label_list" in row.keys() else None
+            if ll:
+                parsed = _json.loads(ll)
+                if isinstance(parsed, list):
+                    labels = [str(x) for x in parsed if str(x).strip()]
+        except Exception:
+            labels = []
+        try:
+            ld = row["label_definitions"] if "label_definitions" in row.keys() else None
+            if ld:
+                parsed = _json.loads(ld)
+                if isinstance(parsed, dict):
+                    defs = {str(k): str(v) for k, v in parsed.items()}
+        except Exception:
+            defs = {}
+        return {"label_list": labels, "label_definitions": defs}
     finally:
         await db.close()
 

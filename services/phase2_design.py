@@ -5,22 +5,23 @@ import re
 from datetime import datetime
 from typing import AsyncGenerator
 from database import get_db
-from services.gpt_client import call_gpt, get_task_gpt_config, get_task_sim_config, get_task_judge_config, get_task_type
+from services.gpt_client import call_gpt, get_task_gpt_config, get_task_sim_config, get_task_type, get_task_labels
 from services.delta import compute_learning_rate, count_completed_runs
 from services.experiment_history import build_experiment_history
 from services.sse_helpers import log_event, result_event, done_event, LogCollector
-from services.phase4_judge import (
-    _classify_from_text as _classify_judge_text,
-    _extract_json as _extract_judge_json,
+from services.judge_api import (
+    JudgeAPIError,
+    run_judge_for_cases,
+    validate_generation_task,
 )
 
 logger = logging.getLogger(__name__)
 
 STRATEGY_PROMPT_PATH = "prompts/phase2_strategy.txt"
+STRATEGY_PROMPT_PATH_CLASSIFICATION = "prompts/phase2_strategy_classification.txt"
 CANDIDATE_PROMPT_PATH = "prompts/phase2_candidate.txt"
+CANDIDATE_PROMPT_PATH_CLASSIFICATION = "prompts/phase2_candidate_classification.txt"
 REPAIR_PROMPT_PATH = "prompts/phase2_repair.txt"
-JUDGE_SYSTEM_PROMPT_PATH = "prompts/phase4_judge.txt"
-JUDGE_USER_PROMPT_PATH = "prompts/phase4_judge_user.txt"
 ANCHORS_DIR = "prompts/anchors"
 
 NODE_LABELS = ["A", "B", "C"]
@@ -295,6 +296,73 @@ def _load_anchor_guide(filename: str) -> str:
         return ""
 
 
+def _format_label_list_p2(labels: list) -> str:
+    if not labels:
+        return "(라벨 집합 미지정)"
+    return "[" + ", ".join(f'"{l}"' for l in labels) + "]"
+
+
+def _format_label_definitions_p2(defs: dict) -> str:
+    if not defs:
+        return "(라벨 정의 미지정)"
+    return "\n".join(f'- "{k}": {v}' for k, v in defs.items())
+
+
+def _build_strategy_input_classification(
+    task: dict, phase1_summary: dict, experiment_history: str,
+    learning_rate: str, converge_text: str,
+    improvable_count: int, total_count: int,
+    label_list: list, label_defs: dict,
+    prev_run_feedback: str = "",
+    user_guide: str = "",
+    anchor_guide: str = "",
+) -> str:
+    template = _load_prompt(STRATEGY_PROMPT_PATH_CLASSIFICATION)
+
+    scores = phase1_summary.get("scores", {})
+    error_cause_counts = phase1_summary.get("error_cause_counts", {})
+    top_confusions = phase1_summary.get("top_confusions", [])
+    schema_violation_count = phase1_summary.get("schema_violation_count", 0)
+    missed_signals = phase1_summary.get("missed_signals", [])
+    overweighted_signals = phase1_summary.get("overweighted_signals", [])
+    top_issues = phase1_summary.get("top_issues", [])
+    recommended_focus = phase1_summary.get("recommended_focus", "")
+
+    converge_context = ""
+    if converge_text:
+        converge_context = f"[converge 모드 — 이전 최고 성적 참조]\n{converge_text}"
+
+    user_guide_section = ""
+    if user_guide:
+        user_guide_section = f"[사용자 전략 가이드 — 반드시 준수]\n{user_guide}"
+
+    anchor_guide_section = ""
+    if anchor_guide:
+        anchor_guide_section = f"[앵커 가이드 — 프롬프트 설계 시 반드시 참조]\n{anchor_guide}"
+
+    return template.format(
+        generation_task=task.get("generation_task", "분류"),
+        label_list=_format_label_list_p2(label_list),
+        label_definitions=_format_label_definitions_p2(label_defs),
+        error_cause_counts=json.dumps(error_cause_counts, ensure_ascii=False),
+        top_confusions=json.dumps(top_confusions[:10], ensure_ascii=False),
+        schema_violation_count=schema_violation_count,
+        missed_signals=json.dumps(missed_signals[:10], ensure_ascii=False),
+        overweighted_signals=json.dumps(overweighted_signals[:10], ensure_ascii=False),
+        top_issues=json.dumps(top_issues, ensure_ascii=False),
+        recommended_focus=recommended_focus,
+        scores=json.dumps(scores, ensure_ascii=False),
+        improvable_count=improvable_count,
+        total=total_count,
+        experiment_history=experiment_history,
+        learning_rate=learning_rate,
+        converge_context=converge_context,
+        prev_run_feedback=prev_run_feedback,
+        user_guide=user_guide_section,
+        anchor_guide=anchor_guide_section,
+    )
+
+
 def _build_strategy_input(
     task: dict, phase1_summary: dict, experiment_history: str,
     learning_rate: str, converge_text: str,
@@ -430,6 +498,123 @@ def _format_cases_text(cases: list) -> str:
     return "\n".join(lines) if lines else "(대표 케이스 없음)"
 
 
+def _format_cases_text_classification(cases: list) -> str:
+    """분류 대표 오분류 케이스 포맷."""
+    lines = []
+    for i, c in enumerate(cases, 1):
+        stt = (c.get("stt") or "")[:500]
+        ref = (c.get("reference") or "")[:120]
+        gen = (c.get("generated") or "")[:120]
+        ms = c.get("missed_signals", [])
+        ows = c.get("overweighted_signals", [])
+        ks = c.get("key_signals_in_stt", [])
+        lines.append(f"--- 케이스 {i} (ID: {c.get('case_id','')}) ---")
+        lines.append(f"혼동: {c.get('confusion_pair', 'N/A')}  (정답: {ref}  /  예측: {gen})")
+        lines.append(f"오류 원인: {c.get('error_cause', c.get('bucket','N/A'))}")
+        lines.append(f"경계 분석: {c.get('boundary_analysis', 'N/A')}")
+        lines.append(f"정답 라벨 신호: {', '.join(map(str, ks)) if ks else 'N/A'}")
+        lines.append(f"놓친 신호: {', '.join(map(str, ms)) if ms else 'N/A'}")
+        lines.append(f"과대해석 신호: {', '.join(map(str, ows)) if ows else 'N/A'}")
+        lines.append(f"개선 제안: {c.get('improvement_suggestion', 'N/A')}")
+        lines.append(f"STT: {stt}")
+        lines.append("")
+    return "\n".join(lines) if lines else "(대표 케이스 없음)"
+
+
+def _select_cases_for_candidate_classification(
+    focus_confusions: list, improvable_cases: list, max_cases: int = 5
+) -> list:
+    """confusion 쌍에 매칭되는 케이스 우선 선별."""
+    selected = []
+    selected_ids = set()
+    for case in improvable_cases:
+        if len(selected) >= max_cases:
+            break
+        cp = case.get("confusion_pair", "")
+        if cp and any(fc in cp or cp in fc for fc in focus_confusions):
+            if case.get("case_id") not in selected_ids:
+                selected.append(case)
+                selected_ids.add(case["case_id"])
+    # 부족하면 빈도순(리스트 순서) 보충
+    for case in improvable_cases:
+        if len(selected) >= max_cases:
+            break
+        if case.get("case_id") not in selected_ids:
+            selected.append(case)
+            selected_ids.add(case["case_id"])
+    return selected
+
+
+async def _generate_single_candidate_classification(
+    strategy_candidate: dict, design_summary: str,
+    task: dict, improvable_cases: list,
+    label_list: list, label_defs: dict,
+    max_retries: int = 1,
+    user_guide: str = "",
+    anchor_guide: str = "",
+    retry_feedback: str = "",
+    gpt_config: dict | None = None,
+    reasoning: str = "high",
+) -> dict | None:
+    """분류 전용 후보 프롬프트 생성."""
+    label = strategy_candidate["label"]
+    node_count = strategy_candidate["node_count"]
+    focus_confusions = strategy_candidate.get("focus_confusions", []) or strategy_candidate.get("focus_patterns", [])
+
+    rep_cases = _select_cases_for_candidate_classification(focus_confusions, improvable_cases)
+    cases_text = _format_cases_text_classification(rep_cases)
+
+    user_guide_section = ""
+    if user_guide:
+        user_guide_section = f"\n[사용자 전략 가이드 — 반드시 준수]\n{user_guide}\n"
+
+    anchor_guide_section = ""
+    if anchor_guide:
+        anchor_guide_section = f"\n[앵커 가이드 — 프롬프트 설계 시 반드시 참조]\n{anchor_guide}\n"
+
+    template = _load_prompt(CANDIDATE_PROMPT_PATH_CLASSIFICATION)
+    prompt = template.format(
+        generation_task=task.get("generation_task", "분류"),
+        candidate_label=label,
+        strategy_name=strategy_candidate.get("strategy_name", ""),
+        pattern=strategy_candidate.get("pattern", ""),
+        node_count=node_count,
+        node_roles=json.dumps(strategy_candidate.get("node_roles", []), ensure_ascii=False),
+        node_reasoning_config=json.dumps(strategy_candidate.get("node_reasoning_config", []), ensure_ascii=False),
+        rationale=strategy_candidate.get("rationale", ""),
+        focus_confusions=json.dumps(focus_confusions, ensure_ascii=False),
+        design_summary=design_summary,
+        representative_cases=cases_text,
+        label_list=_format_label_list_p2(label_list),
+        label_definitions=_format_label_definitions_p2(label_defs),
+        user_guide=user_guide_section,
+        anchor_guide=anchor_guide_section,
+    )
+
+    if retry_feedback:
+        prompt += f"\n\n[Mini-validation 1차 실패 피드백 — 반드시 반영]\n{retry_feedback}\n위 실패를 반복하지 않도록 프롬프트를 근본적으로 개선하라. JSON만 출력하라."
+
+    for attempt in range(max_retries + 1):
+        try:
+            raw = await call_gpt([{"role": "user", "content": prompt}], reasoning=reasoning, **(gpt_config or {}))
+            result = _extract_json(raw)
+            nodes = result.get("nodes", [])
+            if nodes:
+                return {
+                    "label": label,
+                    "node_count": node_count,
+                    "rationale": strategy_candidate.get("rationale", ""),
+                    "focus_patterns": focus_confusions,
+                    "node_roles": strategy_candidate.get("node_roles", []),
+                    "node_reasoning_config": strategy_candidate.get("node_reasoning_config", []),
+                    "nodes": nodes,
+                }
+            logger.warning(f"[Step2-cls] 후보 {label} attempt {attempt+1}: nodes 비어있음")
+        except Exception as e:
+            logger.warning(f"[Step2-cls] 후보 {label} attempt {attempt+1} 오류: {e}")
+    return None
+
+
 async def _generate_single_candidate(
     strategy_candidate: dict, design_summary: str,
     task: dict, improvable_cases: list,
@@ -505,6 +690,42 @@ async def _generate_single_candidate(
 
 
 # ─── Step 3: 검증 + 보정 ────────────────────────────────────────────────────
+
+def _ensure_label_schema_in_candidate(candidate: dict, label_list: list, label_defs: dict) -> dict:
+    """분류 후보의 마지막 노드 system_prompt에 라벨 집합이 빠져있으면 강제 삽입.
+    이미 모든 라벨이 포함되어 있으면 그대로 반환.
+    """
+    if not label_list:
+        return candidate
+    nodes = candidate.get("nodes", [])
+    if not nodes:
+        return candidate
+    last = nodes[-1]
+    sys_p = last.get("system_prompt", "") or ""
+    usr_p = last.get("user_prompt", "") or ""
+    combined = sys_p + "\n" + usr_p
+
+    missing_labels = [l for l in label_list if l not in combined]
+    if not missing_labels:
+        return candidate
+
+    # 라벨 enum + 정의 + 출력 제약을 system_prompt 끝에 강제 삽입
+    enum_text = "[" + ", ".join(f'"{l}"' for l in label_list) + "]"
+    defs_text = "\n".join(f'- "{k}": {v}' for k, v in label_defs.items()) if label_defs else ""
+    addendum = (
+        "\n\n[필수 - 라벨 집합]\n"
+        "출력은 반드시 다음 라벨 중 정확히 하나만 출력하라. "
+        "다른 어떤 문자(설명, 이유, 따옴표, 공백, 문장부호)도 추가하지 마라.\n"
+        f"{enum_text}\n"
+    )
+    if defs_text:
+        addendum += f"\n[라벨 정의]\n{defs_text}\n"
+    last["system_prompt"] = (sys_p + addendum).strip()
+    nodes[-1] = last
+    candidate["nodes"] = nodes
+    logger.info(f"[label-schema] 후보 {candidate.get('label')}: 누락 라벨 {missing_labels} → 마지막 노드에 강제 삽입")
+    return candidate
+
 
 def _validate_candidate(candidate: dict) -> list:
     """후보의 노드 검증. 누락된 노드 라벨 리스트 반환."""
@@ -874,132 +1095,179 @@ def _exact_match_judge_p2(reference: str, generated: str) -> tuple[str, str]:
     return "오답", "라벨 불일치"
 
 
-async def _mini_judge(
-    case: dict, generated: str,
-    judge_sys: str, judge_user_tmpl: str,
-    judge_config: dict | None = None,
-) -> tuple[str, str]:
-    """Phase 4 Judge 프롬프트로 간이 판정. (evaluation, reason) 튜플 반환."""
+async def _simulate_candidate_cases(
+    candidate: dict,
+    validation_cases: list,
+    sim_config: dict | None,
+    concurrency: int = 5,
+) -> list[dict]:
+    """단일 candidate에 대해 모든 validation_case의 generated 결과를 수집.
+
+    Returns: [{case_id, stt, reference, keywords, generation_task, generated, error?}, ...]
+    """
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _gen_one(case: dict) -> dict:
+        async with semaphore:
+            base = {
+                "case_id": case.get("case_id", ""),
+                "stt": case.get("stt", ""),
+                "reference": case.get("reference", ""),
+                "keywords": case.get("keywords", ""),
+                "generation_task": case.get("generation_task", ""),
+            }
+            try:
+                generated = await _simulate_workflow_for_case(candidate, case, sim_config)
+                base["generated"] = generated or ""
+            except Exception as e:
+                logger.warning(
+                    f"[mini-validation] 시뮬 실패 — 후보 {candidate.get('label')}, 케이스 {case.get('case_id')}: {e}"
+                )
+                base["generated"] = ""
+                base["error"] = str(e)
+            return base
+
+    return await asyncio.gather(*[_gen_one(c) for c in validation_cases])
+
+
+async def _judge_candidate_cases_via_api(
+    candidate_label: str,
+    sim_results: list[dict],
+    generation_task: str,
+    run_id: int,
+) -> list[dict]:
+    """sim_results 를 Judge API로 일괄 판정. 결과 dict list 반환.
+
+    각 결과: {case_id, evaluation, reason, stt, reference, generated_preview, error?}
+    """
+    # API 입력용 dict (case_id 키 사용)
+    api_cases = []
+    for r in sim_results:
+        api_cases.append({
+            "case_id": r.get("case_id", ""),
+            "stt": r.get("stt", ""),
+            "reference": r.get("reference", ""),
+            "keywords": r.get("keywords", ""),
+            "generated": r.get("generated", ""),
+        })
+
+    sub_dir = f"phase2/run_{run_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}_cand_{candidate_label}"
+
     try:
-        user_content = judge_user_tmpl.format(
-            stt=case.get("stt", ""),
-            generation_task=case.get("generation_task", ""),
-            reference=case.get("reference", ""),
-            keywords=case.get("keywords", ""),
-            generated=generated,
+        judge_cases, _summary = await run_judge_for_cases(
+            cases=api_cases,
+            generation_task=generation_task,
+            sub_dir=sub_dir,
+            request_id=f"run{run_id}_cand{candidate_label}",
         )
-    except KeyError:
-        user_content = judge_user_tmpl.format_map(SafeDict(
-            stt=case.get("stt", ""),
-            generation_task=case.get("generation_task", ""),
-            reference=case.get("reference", ""),
-            keywords=case.get("keywords", ""),
-            generated=generated,
-        ))
+    except JudgeAPIError as e:
+        logger.warning(f"[mini-validation] Judge API 실패 (후보 {candidate_label}): {e}")
+        return [
+            {
+                "case_id": r.get("case_id", ""),
+                "evaluation": "평가실패",
+                "reason": str(e),
+                "stt": r.get("stt", ""),
+                "reference": r.get("reference", ""),
+                "generated_preview": (r.get("generated") or "")[:200],
+                "error": str(e),
+            }
+            for r in sim_results
+        ]
 
-    messages = []
-    if judge_sys:
-        messages.append({"role": "system", "content": judge_sys})
-    messages.append({"role": "user", "content": user_content})
+    judge_map = {str(jc.get("id", "")): jc for jc in judge_cases}
 
-    try:
-        raw = await call_gpt(messages, reasoning="low", **(judge_config or {}))
-        result = _extract_judge_json(raw)
-        evaluation = result.get("rating", "평가실패")
-        reason = result.get("reason", "")
-        if evaluation == "평가실패":
-            evaluation, _ = _classify_judge_text(raw)
-            reason = reason or raw[:200]
-        return evaluation, reason
-    except Exception as e:
-        logger.warning(f"[mini-judge] 판정 실패: {e}")
-        return "평가실패", str(e)
+    details = []
+    for r in sim_results:
+        cid = str(r.get("case_id", ""))
+        jc = judge_map.get(cid)
+        if not jc:
+            evaluation = "평가실패"
+            reason = "Judge 응답에 해당 id 없음"
+        else:
+            evaluation = jc.get("answer_evaluation") or "평가실패"
+            reason = jc.get("answer_evaluation_reason") or ""
+
+        d = {
+            "case_id": cid,
+            "evaluation": evaluation,
+            "reason": reason,
+            "stt": r.get("stt", ""),
+            "reference": r.get("reference", ""),
+            "generated_preview": (r.get("generated") or "")[:200],
+        }
+        if r.get("error"):
+            d["error"] = r["error"]
+        details.append(d)
+    return details
 
 
 async def _run_mini_validation(
     candidates: list, validation_cases: list,
-    judge_config: dict | None = None,
     sim_config: dict | None = None,
     concurrency: int = 5,
     task_type: str = "summarization",
+    run_id: int = 0,
+    generation_task: str = "",
 ) -> list[dict]:
     """모든 후보에 대해 validation_cases로 시뮬+판정 수행.
     - 워크플로우 시뮬레이션: sim_config (생성 모델, 예: qwen3.5-35B-A3B)
-    - Judge 판정: judge_config (Judge LLM, 예: gpt-oss-120B) — summarization 전용
-    - classification: LLM Judge 대신 텍스트 일치 비교 사용
+    - Judge 판정 (summarization): LLM Judge API 호출 (후보당 1회 일괄 판정)
+    - Judge 판정 (classification): 텍스트 일치 비교 (LLM/API 호출 없음)
     각 후보에 mini_validation 필드를 부착하고, pass_rate 내림차순 정렬하여 반환."""
     is_classification = task_type == "classification"
 
-    # Judge 프롬프트 1회 로드 (summarization만 필요)
-    judge_sys = ""
-    judge_user_tmpl = ""
+    # summarization: generation_task 사전 검증 (API enum)
     if not is_classification:
         try:
-            judge_sys = _load_prompt(JUDGE_SYSTEM_PROMPT_PATH)
-            judge_user_tmpl = _load_prompt(JUDGE_USER_PROMPT_PATH)
-        except FileNotFoundError:
-            logger.warning("[mini-validation] Judge 프롬프트 파일 없음 — validation 스킵")
+            generation_task = validate_generation_task(generation_task)
+        except JudgeAPIError as e:
+            logger.warning(f"[mini-validation] {e} — validation 스킵")
             return candidates
-
-        if not judge_user_tmpl:
-            logger.warning("[mini-validation] Judge user 프롬프트 비어있음 — validation 스킵")
-            return candidates
-
-    semaphore = asyncio.Semaphore(concurrency)
-
-    async def _evaluate_one(candidate: dict, case: dict) -> dict:
-        async with semaphore:
-            try:
-                # 워크플로우 시뮬레이션은 sim_config (생성 모델) 사용
-                generated = await _simulate_workflow_for_case(candidate, case, sim_config)
-                # Judge 판정: classification은 텍스트 일치, summarization은 LLM Judge
-                if is_classification:
-                    evaluation, reason = _exact_match_judge_p2(case.get("reference", ""), generated)
-                else:
-                    evaluation, reason = await _mini_judge(case, generated, judge_sys, judge_user_tmpl, judge_config)
-                return {
-                    "case_id": case.get("case_id", ""),
-                    "evaluation": evaluation,
-                    "reason": reason,
-                    "stt": case.get("stt", ""),
-                    "reference": case.get("reference", ""),
-                    "generated_preview": generated[:200] if generated else "",
-                }
-            except Exception as e:
-                logger.warning(f"[mini-validation] 후보 {candidate.get('label')}, 케이스 {case.get('case_id')} 실패: {e}")
-                return {
-                    "case_id": case.get("case_id", ""),
-                    "evaluation": "평가실패",
-                    "reason": "",
-                    "stt": case.get("stt", ""),
-                    "reference": case.get("reference", ""),
-                    "generated_preview": "",
-                    "error": str(e),
-                }
 
     for candidate in candidates:
-        tasks = [_evaluate_one(candidate, case) for case in validation_cases]
-        details = await asyncio.gather(*tasks, return_exceptions=True)
+        # 1) 시뮬레이션: 모든 validation_case에 대해 generated 수집
+        sim_results = await _simulate_candidate_cases(
+            candidate, validation_cases, sim_config, concurrency=concurrency
+        )
 
-        # 예외 처리
-        clean_details = []
-        for d in details:
-            if isinstance(d, Exception):
-                clean_details.append({"case_id": "", "evaluation": "평가실패", "error": str(d)})
-            else:
-                clean_details.append(d)
+        # 2) 판정
+        if is_classification:
+            details = []
+            for r in sim_results:
+                evaluation, reason = _exact_match_judge_p2(
+                    r.get("reference", ""), r.get("generated", "")
+                )
+                d = {
+                    "case_id": r.get("case_id", ""),
+                    "evaluation": evaluation,
+                    "reason": reason,
+                    "stt": r.get("stt", ""),
+                    "reference": r.get("reference", ""),
+                    "generated_preview": (r.get("generated") or "")[:200],
+                }
+                if r.get("error"):
+                    d["error"] = r["error"]
+                details.append(d)
+        else:
+            details = await _judge_candidate_cases_via_api(
+                candidate_label=str(candidate.get("label", "")),
+                sim_results=sim_results,
+                generation_task=generation_task,
+                run_id=run_id,
+            )
 
-        total = len(clean_details)
+        total = len(details)
         # classification: '정답'만 통과로 인정, summarization: '정답' + '과답' 통과
         positive_set = ("정답",) if is_classification else ("정답", "과답")
-        passed = sum(1 for d in clean_details if d["evaluation"] in positive_set)
+        passed = sum(1 for d in details if d["evaluation"] in positive_set)
         pass_rate = round(passed / total, 2) if total > 0 else 0.0
 
         candidate["mini_validation"] = {
             "pass_rate": pass_rate,
             "passed": passed,
             "total": total,
-            "details": clean_details,
+            "details": details,
         }
 
     # pass_rate 내림차순 정렬
@@ -1076,12 +1344,15 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
 
         # 실험별 GPT 설정 로드 (분석용 — 전략 수립, 후보 생성, 검증보정)
         gpt_config = await get_task_gpt_config(run_id)
-        # Judge LLM 설정 로드 (mini-validation 판정용 — 폴백: gpt_config)
-        judge_config = await get_task_judge_config(run_id)
         # 시뮬레이션(생성) 모델 설정 로드 (mini-validation용)
         sim_config = await get_task_sim_config(run_id)
         # Task 유형 (summarization | classification)
         task_type = await get_task_type(run_id)
+        is_classification = task_type == "classification"
+        # 분류 라벨 메타데이터
+        labels_meta = await get_task_labels(run_id) if is_classification else {"label_list": [], "label_definitions": {}}
+        cls_label_list = labels_meta.get("label_list", [])
+        cls_label_defs = labels_meta.get("label_definitions", {})
 
         # Phase 1 결과 조회
         async with db.execute(
@@ -1178,13 +1449,25 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
         # ════════════════════════════════════════════════════════════════════
         yield collector.log("info", "Step 1/4: 후보 구조 전략 수립 중...")
 
-        strategy_prompt = _build_strategy_input(
-            task, phase1_summary, experiment_history,
-            learning_rate, converge_text, improvable_count, total_count,
-            prev_run_feedback=prev_run_feedback,
-            user_guide=user_guide,
-            anchor_guide=anchor_guide,
-        )
+        if is_classification:
+            if not cls_label_list:
+                yield collector.log("warn", "라벨 집합이 비어있습니다. Task 설정에서 라벨을 입력해야 분류 전략이 정상 동작합니다.")
+            strategy_prompt = _build_strategy_input_classification(
+                task, phase1_summary, experiment_history,
+                learning_rate, converge_text, improvable_count, total_count,
+                label_list=cls_label_list, label_defs=cls_label_defs,
+                prev_run_feedback=prev_run_feedback,
+                user_guide=user_guide,
+                anchor_guide=anchor_guide,
+            )
+        else:
+            strategy_prompt = _build_strategy_input(
+                task, phase1_summary, experiment_history,
+                learning_rate, converge_text, improvable_count, total_count,
+                prev_run_feedback=prev_run_feedback,
+                user_guide=user_guide,
+                anchor_guide=anchor_guide,
+            )
         strategy_result = await _call_strategy_step(strategy_prompt, max_retries=1, gpt_config=gpt_config, reasoning=reasoning)
 
         if not strategy_result:
@@ -1207,15 +1490,28 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
         # ════════════════════════════════════════════════════════════════════
         yield collector.log("info", "Step 2/4: 후보별 프롬프트 생성 중...")
 
-        generation_tasks = [
-            _generate_single_candidate(sc, design_summary, task, improvable_cases,
-                                       user_guide=user_guide,
-                                       reference_style_profile=reference_style_profile,
-                                       anchor_guide=anchor_guide,
-                                       gpt_config=gpt_config,
-                                       reasoning=reasoning)
-            for sc in strategy_candidates
-        ]
+        if is_classification:
+            generation_tasks = [
+                _generate_single_candidate_classification(
+                    sc, design_summary, task, improvable_cases,
+                    label_list=cls_label_list, label_defs=cls_label_defs,
+                    user_guide=user_guide,
+                    anchor_guide=anchor_guide,
+                    gpt_config=gpt_config,
+                    reasoning=reasoning,
+                )
+                for sc in strategy_candidates
+            ]
+        else:
+            generation_tasks = [
+                _generate_single_candidate(sc, design_summary, task, improvable_cases,
+                                           user_guide=user_guide,
+                                           reference_style_profile=reference_style_profile,
+                                           anchor_guide=anchor_guide,
+                                           gpt_config=gpt_config,
+                                           reasoning=reasoning)
+                for sc in strategy_candidates
+            ]
         generation_results = await asyncio.gather(*generation_tasks, return_exceptions=True)
 
         generated_candidates = []
@@ -1277,6 +1573,12 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
             await _mark_phase_failed(run_id, 2)
             return
 
+        # ── Classification: 라벨 집합 enum 강제 (마지막 노드에 누락 라벨 삽입) ──
+        if is_classification and cls_label_list:
+            for cand in final_candidates:
+                _ensure_label_schema_in_candidate(cand, cls_label_list, cls_label_defs)
+            yield collector.log("info", "라벨 enum 스키마 검증 완료 (누락 시 마지막 노드에 강제 삽입)")
+
         # ════════════════════════════════════════════════════════════════════
         # Step 4/4: Mini-validation
         # ════════════════════════════════════════════════════════════════════
@@ -1293,7 +1595,13 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                 yield collector.log("warn", "Step 4/4: Mini-validation — 시뮬레이션 LLM 미설정, 기본 GPT로 시뮬레이션 수행")
                 yield collector.log("info", f"Mini-validation 시작 ({len(validation_cases)}건 케이스, {len(final_candidates)}개 후보)")
 
-            final_candidates = await _run_mini_validation(final_candidates, validation_cases, judge_config=judge_config, sim_config=sim_config, task_type=task_type)
+            final_candidates = await _run_mini_validation(
+                final_candidates, validation_cases,
+                sim_config=sim_config,
+                task_type=task_type,
+                run_id=run_id,
+                generation_task=task.get("generation_task", "") or "",
+            )
 
             # 결과 로깅
             for cand in final_candidates:
@@ -1323,18 +1631,32 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                 retry_feedback_text = _build_retry_feedback(final_candidates)
 
                 # Step 2 재실행: 전략은 유지, 프롬프트만 재생성
-                retry_gen_tasks = [
-                    _generate_single_candidate(
-                        sc, design_summary, task, improvable_cases,
-                        user_guide=user_guide,
-                        reference_style_profile=reference_style_profile,
-                        anchor_guide=anchor_guide,
-                        retry_feedback=retry_feedback_text,
-                        gpt_config=gpt_config,
-                        reasoning=reasoning,
-                    )
-                    for sc in strategy_candidates
-                ]
+                if is_classification:
+                    retry_gen_tasks = [
+                        _generate_single_candidate_classification(
+                            sc, design_summary, task, improvable_cases,
+                            label_list=cls_label_list, label_defs=cls_label_defs,
+                            user_guide=user_guide,
+                            anchor_guide=anchor_guide,
+                            retry_feedback=retry_feedback_text,
+                            gpt_config=gpt_config,
+                            reasoning=reasoning,
+                        )
+                        for sc in strategy_candidates
+                    ]
+                else:
+                    retry_gen_tasks = [
+                        _generate_single_candidate(
+                            sc, design_summary, task, improvable_cases,
+                            user_guide=user_guide,
+                            reference_style_profile=reference_style_profile,
+                            anchor_guide=anchor_guide,
+                            retry_feedback=retry_feedback_text,
+                            gpt_config=gpt_config,
+                            reasoning=reasoning,
+                        )
+                        for sc in strategy_candidates
+                    ]
                 retry_results = await asyncio.gather(*retry_gen_tasks, return_exceptions=True)
 
                 retry_candidates = []
@@ -1369,12 +1691,18 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                                 validated_retry.append(repaired)
 
                 if validated_retry:
+                    # Classification: 재시도 후보에도 라벨 enum 강제
+                    if is_classification and cls_label_list:
+                        for cand in validated_retry:
+                            _ensure_label_schema_in_candidate(cand, cls_label_list, cls_label_defs)
                     # Step 4 재실행: mini-validation
                     yield collector.log("info", f"재시도 mini-validation ({len(validated_retry)}개 후보)")
                     validated_retry = await _run_mini_validation(
                         validated_retry, validation_cases,
-                        judge_config=judge_config, sim_config=sim_config,
+                        sim_config=sim_config,
                         task_type=task_type,
+                        run_id=run_id,
+                        generation_task=task.get("generation_task", "") or "",
                     )
 
                     for cand in validated_retry:
