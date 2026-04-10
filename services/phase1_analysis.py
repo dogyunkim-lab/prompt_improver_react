@@ -42,6 +42,48 @@ def _format_label_definitions(defs: dict) -> str:
     return "\n".join(lines)
 
 
+_ID_FIELD_CANDIDATES = ("id", "case_id", "no", "idx", "index", "case_no", "_id", "row_id")
+
+
+def _detect_id_field(cases: list) -> str | None:
+    """Judge JSON 에서 케이스 식별자가 들어있는 필드명 자동 감지.
+    값이 비어있지 않은 케이스가 1건 이상 존재하는 첫 후보를 반환.
+    """
+    for field in _ID_FIELD_CANDIDATES:
+        if any(
+            (str(c.get(field, "")) if c.get(field) is not None else "").strip()
+            for c in cases[:20]
+        ):
+            return field
+    return None
+
+
+def _normalize_case_ids(cases: list) -> tuple[int, int, str | None]:
+    """case 들의 'id' 필드를 고유한 비빈 값으로 보정.
+
+    - 다른 필드명(case_id, no, idx 등)이 사용된 경우 자동 감지하여 'id' 로 복사
+    - 빈 값/None/중복인 경우 'row_<N>' 로 자동 부여
+    - 모든 케이스의 case['id'] 가 unique 함이 보장됨
+
+    Returns: (재부여_건수, 전체_건수, detected_field_name)
+    """
+    detected = _detect_id_field(cases)
+    seen: set[str] = set()
+    reassigned = 0
+    for idx, case in enumerate(cases):
+        raw = case.get(detected, "") if detected else ""
+        cid = (str(raw) if raw is not None else "").strip()
+        if not cid or cid in seen:
+            cid = f"row_{idx + 1}"
+            # row_N 도 충돌하면 (이미 같은 이름의 row_N 가 있을 가능성은 거의 없음) 더 넓힘
+            while cid in seen:
+                cid = f"row_{idx + 1}_{len(seen)}"
+            reassigned += 1
+        seen.add(cid)
+        case["id"] = cid  # 다운스트림에서 모두 case.get("id") 사용 → 표준화
+    return reassigned, len(cases), detected
+
+
 def _detect_eval_field(cases: list) -> str:
     """JSON 케이스에서 오답/정답/과답 값이 들어있는 필드명 자동 감지."""
     eval_values = {"오답", "과답", "정답", "평가실패"}
@@ -198,6 +240,27 @@ async def run_phase1(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
             return
 
         yield collector.log("info", f"감지된 필드: {list(judge_data[0].keys())}")
+
+        # ── case_id 정규화: 누락/중복 방지 (mini-validation Judge map 충돌 차단) ──
+        reassigned, total, detected_id_field = _normalize_case_ids(judge_data)
+        if detected_id_field is None:
+            yield collector.log(
+                "warn",
+                f"Judge JSON 에 식별자 필드(id/case_id/no 등)가 없습니다 — "
+                f"전체 {total}건에 row_N 으로 자동 부여 (mini-validation 매핑 충돌 방지)"
+            )
+        else:
+            if detected_id_field != "id":
+                yield collector.log(
+                    "info",
+                    f"Judge JSON id 필드 감지: '{detected_id_field}' → 'id' 로 정규화"
+                )
+            if reassigned > 0:
+                yield collector.log(
+                    "warn",
+                    f"id 가 비어있거나 중복인 케이스 {reassigned}/{total}건 → row_N 으로 자동 보정 "
+                    f"(mini-validation/Phase 4 매핑 충돌 방지)"
+                )
 
         # ── Task 유형별 판정 필드 결정 ────────────────────────────────────────
         if is_classification:

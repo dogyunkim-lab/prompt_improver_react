@@ -1174,15 +1174,37 @@ async def _judge_candidate_cases_via_api(
       - judge_error: API 호출 자체가 실패한 경우 에러 메시지, 정상이면 None
     """
     # API 입력용 dict (case_id 키 사용)
+    # ── 중복/빈 case_id 가 있으면 mini-validation 전용 prefix 로 강제 고유화 ──
+    # (Judge API 응답을 case_id 로 매핑할 때 충돌하면 모든 detail 의 reason 이
+    #  마지막 한 건의 값으로 덮어써져, reference/generated 와 무관한 사유가 표시됨)
     api_cases = []
-    for r in sim_results:
+    seen_ids: set[str] = set()
+    rewritten_count = 0
+    effective_ids: list[str] = []
+    for idx, r in enumerate(sim_results):
+        raw = (r.get("case_id") or "").strip()
+        unique_id = raw or f"mv{idx + 1}"
+        if unique_id in seen_ids:
+            unique_id = f"mv{idx + 1}_{raw or 'noid'}"
+            while unique_id in seen_ids:
+                unique_id = f"{unique_id}_x"
+            rewritten_count += 1
+        elif not raw:
+            rewritten_count += 1
+        seen_ids.add(unique_id)
+        effective_ids.append(unique_id)
         api_cases.append({
-            "case_id": r.get("case_id", ""),
+            "case_id": unique_id,
             "stt": r.get("stt", ""),
             "reference": r.get("reference", ""),
             "keywords": r.get("keywords", ""),
             "generated": r.get("generated", ""),
         })
+    if rewritten_count > 0:
+        logger.warning(
+            f"[mini-validation] 후보 {candidate_label}: sim_results 의 case_id 가 비었거나 중복 "
+            f"({rewritten_count}/{len(sim_results)}건) — mv-prefix 로 강제 고유화"
+        )
 
     sub_dir = f"phase2/run_{run_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}_cand_{candidate_label}"
 
@@ -1210,12 +1232,22 @@ async def _judge_candidate_cases_via_api(
         ]
         return details_failed, err_msg
 
-    judge_map = {str(jc.get("id", "")): jc for jc in judge_cases}
+    # 1차 매핑: id 로 lookup
+    judge_by_id: dict[str, dict] = {}
+    for jc in judge_cases:
+        jid = str(jc.get("id", "") or "").strip()
+        if jid and jid not in judge_by_id:
+            judge_by_id[jid] = jc
+
+    # 2차 매핑: 응답 길이가 입력과 같으면 row 순서 매핑 (서버가 id 를 못 돌려준 경우)
+    fallback_by_index = (len(judge_cases) == len(sim_results))
 
     details = []
-    for r in sim_results:
-        cid = str(r.get("case_id", ""))
-        jc = judge_map.get(cid)
+    for i, r in enumerate(sim_results):
+        eff_id = effective_ids[i]
+        jc = judge_by_id.get(eff_id)
+        if not jc and fallback_by_index:
+            jc = judge_cases[i]
         if not jc:
             evaluation = "평가실패"
             reason = "Judge 응답에 해당 id 없음"
@@ -1224,7 +1256,7 @@ async def _judge_candidate_cases_via_api(
             reason = jc.get("answer_evaluation_reason") or ""
 
         d = {
-            "case_id": cid,
+            "case_id": (r.get("case_id") or "").strip() or eff_id,
             "evaluation": evaluation,
             "reason": reason,
             "stt": r.get("stt", ""),
