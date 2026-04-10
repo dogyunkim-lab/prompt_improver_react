@@ -176,12 +176,14 @@ export interface MiniValidationCandidateResult {
   passed: number;
   total: number;
   details: MiniValidationDetail[];
+  judge_error?: string | null;
 }
 
 export interface MiniValidationSummary {
   enabled: boolean;
   validation_case_count: number;
   candidate_results: MiniValidationCandidateResult[];
+  skip_reason?: string;
 }
 
 /* ── Dify ── */

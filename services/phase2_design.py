@@ -1135,10 +1135,12 @@ async def _judge_candidate_cases_via_api(
     sim_results: list[dict],
     generation_task: str,
     run_id: int,
-) -> list[dict]:
-    """sim_results 를 Judge API로 일괄 판정. 결과 dict list 반환.
+) -> tuple[list[dict], str | None]:
+    """sim_results 를 Judge API로 일괄 판정.
 
-    각 결과: {case_id, evaluation, reason, stt, reference, generated_preview, error?}
+    Returns: (details, judge_error)
+      - details: 각 case 의 판정 결과 dict 목록
+      - judge_error: API 호출 자체가 실패한 경우 에러 메시지, 정상이면 None
     """
     # API 입력용 dict (case_id 키 사용)
     api_cases = []
@@ -1161,19 +1163,21 @@ async def _judge_candidate_cases_via_api(
             request_id=f"run{run_id}_cand{candidate_label}",
         )
     except JudgeAPIError as e:
-        logger.warning(f"[mini-validation] Judge API 실패 (후보 {candidate_label}): {e}")
-        return [
+        err_msg = str(e)
+        logger.warning(f"[mini-validation] Judge API 실패 (후보 {candidate_label}): {err_msg}")
+        details_failed = [
             {
                 "case_id": r.get("case_id", ""),
                 "evaluation": "평가실패",
-                "reason": str(e),
+                "reason": err_msg,
                 "stt": r.get("stt", ""),
                 "reference": r.get("reference", ""),
                 "generated_preview": (r.get("generated") or "")[:200],
-                "error": str(e),
+                "error": err_msg,
             }
             for r in sim_results
         ]
+        return details_failed, err_msg
 
     judge_map = {str(jc.get("id", "")): jc for jc in judge_cases}
 
@@ -1199,7 +1203,7 @@ async def _judge_candidate_cases_via_api(
         if r.get("error"):
             d["error"] = r["error"]
         details.append(d)
-    return details
+    return details, None
 
 
 async def _run_mini_validation(
@@ -1214,16 +1218,12 @@ async def _run_mini_validation(
     - 워크플로우 시뮬레이션: sim_config (생성 모델, 예: qwen3.5-35B-A3B)
     - Judge 판정 (summarization): LLM Judge API 호출 (후보당 1회 일괄 판정)
     - Judge 판정 (classification): 텍스트 일치 비교 (LLM/API 호출 없음)
-    각 후보에 mini_validation 필드를 부착하고, pass_rate 내림차순 정렬하여 반환."""
-    is_classification = task_type == "classification"
+    각 후보에 mini_validation 필드(pass_rate, passed, total, details, judge_error?)를
+    부착하고 pass_rate 내림차순 정렬하여 반환.
 
-    # summarization: generation_task 사전 검증 (API enum)
-    if not is_classification:
-        try:
-            generation_task = validate_generation_task(generation_task)
-        except JudgeAPIError as e:
-            logger.warning(f"[mini-validation] {e} — validation 스킵")
-            return candidates
+    summarization 의 경우 caller 가 사전에 validate_generation_task 를 호출해
+    generation_task 가 API enum 에 포함됨을 보장해야 한다."""
+    is_classification = task_type == "classification"
 
     for candidate in candidates:
         # 1) 시뮬레이션: 모든 validation_case에 대해 generated 수집
@@ -1232,6 +1232,7 @@ async def _run_mini_validation(
         )
 
         # 2) 판정
+        judge_error: str | None = None
         if is_classification:
             details = []
             for r in sim_results:
@@ -1250,7 +1251,7 @@ async def _run_mini_validation(
                     d["error"] = r["error"]
                 details.append(d)
         else:
-            details = await _judge_candidate_cases_via_api(
+            details, judge_error = await _judge_candidate_cases_via_api(
                 candidate_label=str(candidate.get("label", "")),
                 sim_results=sim_results,
                 generation_task=generation_task,
@@ -1263,12 +1264,15 @@ async def _run_mini_validation(
         passed = sum(1 for d in details if d["evaluation"] in positive_set)
         pass_rate = round(passed / total, 2) if total > 0 else 0.0
 
-        candidate["mini_validation"] = {
+        mv: dict = {
             "pass_rate": pass_rate,
             "passed": passed,
             "total": total,
             "details": details,
         }
+        if judge_error:
+            mv["judge_error"] = judge_error
+        candidate["mini_validation"] = mv
 
     # pass_rate 내림차순 정렬
     candidates.sort(key=lambda c: c.get("mini_validation", {}).get("pass_rate", 0), reverse=True)
@@ -1585,7 +1589,20 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
         mini_validation_summary = {"enabled": False, "validation_case_count": 0, "candidate_results": []}
 
         validation_cases = await _select_validation_cases(run_id, improvable_cases, 3)
-        if validation_cases:
+
+        # ── Summarization: generation_task 사전 검증 (Judge API enum) ──
+        validation_skip_reason: str | None = None
+        if validation_cases and not is_classification:
+            try:
+                validate_generation_task(task.get("generation_task", "") or "")
+            except JudgeAPIError as e:
+                validation_skip_reason = str(e)
+                yield collector.log(
+                    "error",
+                    f"Mini-validation 스킵: Judge API generation_task 검증 실패 — {validation_skip_reason}"
+                )
+
+        if validation_cases and not validation_skip_reason:
             case_ids_str = ", ".join(c.get("case_id", "") for c in validation_cases)
             yield collector.log("info", f"검증 케이스 선별: [{case_ids_str}]")
             if sim_config:
@@ -1606,6 +1623,11 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
             # 결과 로깅
             for cand in final_candidates:
                 mv = cand.get("mini_validation", {})
+                if mv.get("judge_error"):
+                    yield collector.log(
+                        "warn",
+                        f"후보 {cand['label']}: Judge API 호출 실패 — {mv['judge_error']}"
+                    )
                 pr = mv.get("pass_rate", 0)
                 passed = mv.get("passed", 0)
                 total = mv.get("total", 0)
@@ -1707,6 +1729,11 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
 
                     for cand in validated_retry:
                         mv = cand.get("mini_validation", {})
+                        if mv.get("judge_error"):
+                            yield collector.log(
+                                "warn",
+                                f"재시도 후보 {cand['label']}: Judge API 호출 실패 — {mv['judge_error']}"
+                            )
                         pr = mv.get("pass_rate", 0)
                         p = mv.get("passed", 0)
                         t = mv.get("total", 0)
@@ -1740,12 +1767,24 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                         "passed": c.get("mini_validation", {}).get("passed", 0),
                         "total": c.get("mini_validation", {}).get("total", 0),
                         "details": c.get("mini_validation", {}).get("details", []),
+                        "judge_error": c.get("mini_validation", {}).get("judge_error"),
                     }
                     for c in final_candidates
                 ],
             }
 
             yield collector.log("ok", f"Mini-validation 완료 — {len(final_candidates)}개 후보 최종 선정")
+        elif validation_skip_reason:
+            mini_validation_summary = {
+                "enabled": False,
+                "validation_case_count": len(validation_cases) if validation_cases else 0,
+                "candidate_results": [],
+                "skip_reason": validation_skip_reason,
+            }
+            yield collector.log(
+                "warn",
+                f"Step 4/4: Mini-validation 스킵 — {validation_skip_reason}"
+            )
         else:
             yield collector.log("info", "Step 4/4: Mini-validation 스킵 (개선 가능한 오답 케이스 없음)")
 

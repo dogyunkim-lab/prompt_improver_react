@@ -9,7 +9,24 @@ interface Props {
 export const MiniValidationPanel: React.FC<Props> = ({ data }) => {
   const [collapsed, setCollapsed] = useState(false);
 
-  if (!data.enabled || data.candidate_results.length === 0) return null;
+  // Skip 케이스: enabled=false 이면서 skip_reason 이 있으면 사유 배너 표시
+  if (!data.enabled) {
+    if (data.skip_reason) {
+      return (
+        <div className="bg-warm-card rounded-[10px] mb-5 shadow-[0_1px_4px_rgba(0,0,0,0.07)] overflow-hidden border border-red-200">
+          <div className="px-4 py-3 text-[13px] font-semibold text-red-700 bg-red-50">
+            Mini-Validation 스킵
+          </div>
+          <div className="px-4 py-3 text-[12px] text-red-700 whitespace-pre-wrap">
+            {data.skip_reason}
+          </div>
+        </div>
+      );
+    }
+    return null;
+  }
+
+  if (data.candidate_results.length === 0) return null;
 
   return (
     <div className="bg-warm-card rounded-[10px] mb-5 shadow-[0_1px_4px_rgba(0,0,0,0.07)] overflow-hidden">
@@ -45,6 +62,12 @@ const CandidateGroup: React.FC<{ result: MiniValidationSummary['candidate_result
           pass_rate: <strong>{pct}%</strong> ({result.passed}/{result.total})
         </span>
       </div>
+
+      {result.judge_error && (
+        <div className="px-3 py-2 bg-red-50 border-t border-red-200 text-[11px] text-red-700">
+          <strong>Judge API 오류:</strong> {result.judge_error}
+        </div>
+      )}
 
       <div className="overflow-x-auto">
         <table className="w-full text-[12px] min-w-[700px]">

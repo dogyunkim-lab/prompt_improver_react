@@ -241,7 +241,10 @@ async def get_run(run_id: int):
                 async with db.execute(
                     """SELECT case_id, stt, reference, generated, evaluation, reason,
                               bucket, analysis_summary, stt_uncertain,
-                              hallucination_detected, judge_agreement, judge_disagreement
+                              hallucination_detected, judge_agreement, judge_disagreement,
+                              missing_instruction, violated_instruction,
+                              error_pattern, improvement_suggestion,
+                              reference_criteria, content_gap
                        FROM case_results WHERE run_id=? ORDER BY rowid""",
                     (run_id,)
                 ) as cursor:
@@ -249,7 +252,8 @@ async def get_run(run_id: int):
                 if case_rows:
                     phases[1]["cases"] = [{
                         "id": r["case_id"],
-                        "judge": r["evaluation"] or "",
+                        "evaluation": r["evaluation"] or "",
+                        "judge": r["evaluation"] or "",  # SSE 호환 별칭
                         "bucket": r["bucket"] or "",
                         "analysis_summary": r["analysis_summary"] or "",
                         "stt_uncertain": r["stt_uncertain"] or "",
@@ -258,6 +262,15 @@ async def get_run(run_id: int):
                         "generated": r["generated"] or "",
                         "judge_disagreement": (r.get("judge_disagreement") or r["reason"] or ""),
                         "hallucination": bool(r.get("hallucination_detected", 0)),
+                        # Phase 1 분석 강화 필드 (CaseDetail 표시용)
+                        "missing_instruction": r.get("missing_instruction") or "",
+                        "violated_instruction": r.get("violated_instruction") or "",
+                        "error_pattern": r.get("error_pattern") or "",
+                        "improvement_suggestion": r.get("improvement_suggestion") or "",
+                        "reference_criteria": r.get("reference_criteria") or "",
+                        # 분류 호환: content_gap → boundary_analysis, error_pattern → confusion_pair
+                        "boundary_analysis": r.get("content_gap") or "",
+                        "confusion_pair": r.get("error_pattern") or "",
                     } for r in case_rows]
                     # eval_chart fallback: DB에 저장 안 된 구 데이터 호환
                     if not phases[1].get("eval_chart") and case_rows:
