@@ -90,6 +90,57 @@ async def get_task_gpt_config(run_id: int) -> dict:
         await db.close()
 
 
+async def get_task_judge_config(run_id: int) -> dict:
+    """run_id에서 task의 Judge(Phase 4) LLM 설정 조회.
+    judge_* 필드가 비어있으면 gpt_* 설정으로 폴백."""
+    from database import get_db
+    db = await get_db()
+    try:
+        async with db.execute(
+            """SELECT t.judge_api_base, t.judge_api_key, t.judge_model,
+                      t.gpt_api_base, t.gpt_api_key, t.gpt_model
+               FROM runs r JOIN tasks t ON t.id = r.task_id
+               WHERE r.id=?""",
+            (run_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return {}
+        cfg = {}
+        api_base = row["judge_api_base"] or row["gpt_api_base"]
+        api_key = row["judge_api_key"] or row["gpt_api_key"]
+        model = row["judge_model"] or row["gpt_model"]
+        if api_base:
+            cfg["api_base"] = api_base
+        if api_key:
+            cfg["api_key"] = api_key
+        if model:
+            cfg["model"] = model
+        return cfg
+    finally:
+        await db.close()
+
+
+async def get_task_type(run_id: int) -> str:
+    """run_id에서 task의 task_type 조회. 기본값은 'summarization'."""
+    from database import get_db
+    db = await get_db()
+    try:
+        async with db.execute(
+            """SELECT t.task_type FROM runs r JOIN tasks t ON t.id = r.task_id WHERE r.id=?""",
+            (run_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return "summarization"
+        tt = row["task_type"] if "task_type" in row.keys() else None
+        if tt in ("summarization", "classification"):
+            return tt
+        return "summarization"
+    finally:
+        await db.close()
+
+
 async def get_task_sim_config(run_id: int) -> dict:
     """run_id에서 task의 시뮬레이션(생성) 모델 설정 조회. 없으면 빈 dict 반환."""
     from database import get_db

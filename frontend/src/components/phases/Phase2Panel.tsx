@@ -53,7 +53,7 @@ export const Phase2Panel: React.FC = () => {
   const currentTask = tasks.find((t) => t.id === selectedTaskId);
 
   const [userGuide, setUserGuide] = useState('');
-  const [reasoning, setReasoning] = useState('high');
+  const [reasoning, setReasoning] = useState('low');
   const isRunning = phaseStatus[2] === 'running';
 
   // 커스텀 에디터 state

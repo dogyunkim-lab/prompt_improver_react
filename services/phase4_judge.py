@@ -3,9 +3,35 @@ import json
 from datetime import datetime
 from typing import AsyncGenerator
 from database import get_db
-from services.gpt_client import call_gpt, get_task_gpt_config
+from services.gpt_client import call_gpt, get_task_judge_config, get_task_type
 from services.delta import compute_and_save_deltas, aggregate_scores
 from services.sse_helpers import log_event, progress_event, result_event, done_event, LogCollector
+
+
+def _normalize_label(text: str) -> str:
+    """Classification 정답 비교용 정규화: 양끝 공백/구두점 제거 + 소문자 + 내부 공백 1칸."""
+    import re
+    s = (text or "").strip().lower()
+    # 양끝의 흔한 구두점/괄호 제거
+    s = s.strip("\"'`.,;:!?()[]{}<>「」『』〔〕【】")
+    # 내부 연속 공백을 한 칸으로
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _exact_match_classify(reference: str, generated: str) -> tuple:
+    """Classification 전용 텍스트 기반 정답 판정. (evaluation, reason) 튜플 반환."""
+    ref = _normalize_label(reference)
+    gen = _normalize_label(generated)
+    if not ref:
+        if not gen:
+            return "정답", "reference 없음 — generated도 없음"
+        return "오답", "reference 없음 — generated가 불필요한 라벨 생성"
+    if not gen:
+        return "오답", "라벨 없음"
+    if ref == gen:
+        return "정답", "라벨 일치"
+    return "오답", f"라벨 불일치 (정답: {reference})"
 
 SYSTEM_PROMPT_PATH = "prompts/phase4_judge.txt"
 USER_PROMPT_PATH = "prompts/phase4_judge_user.txt"
@@ -104,18 +130,29 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
         await db.execute("UPDATE runs SET status='phase4_running', current_phase=4 WHERE id=?", (run_id,))
         await db.commit()
 
-        # 실험별 GPT 설정 로드
-        gpt_config = await get_task_gpt_config(run_id)
+        # Task 유형 조회 (summarization | classification)
+        task_type = await get_task_type(run_id)
+        is_classification = task_type == "classification"
 
-        judge_system = _load_prompt(SYSTEM_PROMPT_PATH)
-        user_template = _load_prompt(USER_PROMPT_PATH)
-        if not user_template:
-            yield collector.log("error", f"User 프롬프트 템플릿이 없습니다: {USER_PROMPT_PATH}")
-            yield done_event("failed")
-            return
+        # 실험별 Judge LLM 설정 로드 (judge_* → 폴백 gpt_*) — classification은 사용 안 함
+        gpt_config = None if is_classification else await get_task_judge_config(run_id)
+
+        if is_classification:
+            judge_system = ""
+            user_template = ""
+        else:
+            judge_system = _load_prompt(SYSTEM_PROMPT_PATH)
+            user_template = _load_prompt(USER_PROMPT_PATH)
+            if not user_template:
+                yield collector.log("error", f"User 프롬프트 템플릿이 없습니다: {USER_PROMPT_PATH}")
+                yield done_event("failed")
+                return
 
         total = len(cases)
-        yield collector.log("info", f"Judge 실행 시작: {total}건")
+        if is_classification:
+            yield collector.log("info", f"Classification 정답 판정 시작: {total}건 (텍스트 일치 비교)")
+        else:
+            yield collector.log("info", f"Judge 실행 시작: {total}건")
 
         semaphore = asyncio.Semaphore(JUDGE_CONCURRENCY)
         done_count = 0
@@ -126,6 +163,18 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
                 ref = (case.get("reference") or "").strip()
                 gen = (case.get("generated") or "").strip()
 
+                # Classification: 텍스트 일치 비교 (LLM 호출 없음)
+                if is_classification:
+                    evaluation, reason = _exact_match_classify(ref, gen)
+                    await db.execute(
+                        "UPDATE case_results SET evaluation=?, reason=? WHERE run_id=? AND case_id=?",
+                        (evaluation, reason, run_id, case["case_id"])
+                    )
+                    await db.commit()
+                    done_count += 1
+                    return evaluation
+
+                # Summarization: Judge LLM 호출
                 # 사전 판정: reference가 비어있는 케이스
                 if not ref or ref == "없음":
                     if not gen or gen == "없음":
@@ -191,9 +240,12 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
                 if not t.done():
                     t.cancel()
 
-        # 점수 집계
-        scores = await aggregate_scores(run_id)
-        yield collector.log("ok", f"점수 집계 완료 — 정답+과답: {scores['score_total']}% (정답:{scores['score_correct']}% 과답:{scores['score_over']}%)")
+        # 점수 집계 (task_type 인지)
+        scores = await aggregate_scores(run_id, task_type=task_type)
+        if is_classification:
+            yield collector.log("ok", f"점수 집계 완료 — 정답: {scores['score_correct']}% (오답:{scores['score_wrong']}%)")
+        else:
+            yield collector.log("ok", f"점수 집계 완료 — 정답+과답: {scores['score_total']}% (정답:{scores['score_correct']}% 과답:{scores['score_over']}%)")
 
         # runs 점수 업데이트
         await db.execute(
@@ -223,12 +275,14 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
             yield collector.log("ok", "Delta 계산 완료")
 
         # BUG-2: 프론트 기대 필드명으로 변환 (correct_plus_over, correct, over, wrong, total)
+        # classification은 over를 사용하지 않음 → correct_plus_over = correct
         frontend_scores = {
             "correct_plus_over": scores["score_total"],
             "correct": scores["score_correct"],
             "over": scores["score_over"],
-            "wrong": round(100 - scores["score_correct"] - scores["score_over"], 1),
+            "wrong": scores.get("score_wrong", round(100 - scores["score_correct"] - scores["score_over"], 1)),
             "total": scores["total"],
+            "task_type": task_type,
         }
         # 케이스 목록 조회 (프론트 테이블용)
         async with db.execute(

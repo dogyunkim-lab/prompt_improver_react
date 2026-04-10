@@ -66,6 +66,11 @@ async def count_completed_runs(task_id: int, exclude_run_id: int) -> int:
 async def compute_and_save_deltas(task_id: int, prev_run_id: int, curr_run_id: int):
     db = await get_db()
     try:
+        # task_type에 따라 POSITIVE 집합 결정
+        async with db.execute("SELECT task_type FROM tasks WHERE id=?", (task_id,)) as cursor:
+            t_row = await cursor.fetchone()
+        task_type = (t_row["task_type"] if t_row and "task_type" in t_row.keys() else None) or "summarization"
+
         async with db.execute(
             "SELECT case_id, evaluation FROM case_results WHERE run_id=?",
             (prev_run_id,)
@@ -83,7 +88,8 @@ async def compute_and_save_deltas(task_id: int, prev_run_id: int, curr_run_id: i
             "DELETE FROM case_deltas WHERE to_run_id=?", (curr_run_id,)
         )
 
-        POSITIVE = {"정답", "과답"}
+        # classification은 '정답'만 positive, summarization은 '정답'과 '과답' 둘 다 positive
+        POSITIVE = {"정답"} if task_type == "classification" else {"정답", "과답"}
 
         for case_id, curr in curr_rows.items():
             prev_eval = prev_rows.get(case_id, {}).get("evaluation") or "없음"
@@ -116,9 +122,18 @@ async def compute_and_save_deltas(task_id: int, prev_run_id: int, curr_run_id: i
         await db.close()
 
 
-async def aggregate_scores(run_id: int) -> dict:
+async def aggregate_scores(run_id: int, task_type: str | None = None) -> dict:
     db = await get_db()
     try:
+        # task_type 미지정 시 DB에서 조회 (run → task)
+        if task_type is None:
+            async with db.execute(
+                """SELECT t.task_type FROM runs r JOIN tasks t ON t.id = r.task_id WHERE r.id=?""",
+                (run_id,)
+            ) as cursor:
+                tt_row = await cursor.fetchone()
+            task_type = (tt_row["task_type"] if tt_row and "task_type" in tt_row.keys() else None) or "summarization"
+
         async with db.execute(
             "SELECT evaluation FROM case_results WHERE run_id=?",
             (run_id,)
@@ -128,20 +143,32 @@ async def aggregate_scores(run_id: int) -> dict:
         total = len(rows)
         if total == 0:
             return {"total": 0, "correct": 0, "over": 0, "wrong": 0,
-                    "score_correct": 0.0, "score_over": 0.0, "score_total": 0.0}
+                    "score_correct": 0.0, "score_over": 0.0, "score_wrong": 0.0,
+                    "score_total": 0.0}
 
         correct = sum(1 for r in rows if r["evaluation"] == "정답")
         over    = sum(1 for r in rows if r["evaluation"] == "과답")
         wrong   = sum(1 for r in rows if r["evaluation"] == "오답")
+
+        score_correct = round(correct / total * 100, 1)
+        score_over    = round(over    / total * 100, 1)
+        score_wrong   = round(wrong   / total * 100, 1)
+
+        # classification은 '과답' 개념이 없음 → score_total = score_correct
+        if task_type == "classification":
+            score_total = score_correct
+        else:
+            score_total = round((correct + over) / total * 100, 1)
 
         return {
             "total": total,
             "correct": correct,
             "over": over,
             "wrong": wrong,
-            "score_correct": round(correct / total * 100, 1),
-            "score_over":    round(over    / total * 100, 1),
-            "score_total":   round((correct + over) / total * 100, 1)
+            "score_correct": score_correct,
+            "score_over": score_over,
+            "score_wrong": score_wrong,
+            "score_total": score_total,
         }
     finally:
         await db.close()

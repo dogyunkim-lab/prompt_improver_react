@@ -173,8 +173,14 @@ async def init_db():
             "ALTER TABLE tasks ADD COLUMN sim_api_base TEXT",
             "ALTER TABLE tasks ADD COLUMN sim_api_key TEXT",
             "ALTER TABLE tasks ADD COLUMN sim_model TEXT",
+            # Judge 전용 LLM 설정 (Phase 4) — 비어있으면 gpt_* 사용
+            "ALTER TABLE tasks ADD COLUMN judge_api_base TEXT",
+            "ALTER TABLE tasks ADD COLUMN judge_api_key TEXT",
+            "ALTER TABLE tasks ADD COLUMN judge_model TEXT",
             # 앵커 가이드 파일명 (prompts/anchors/ 내 .txt)
             "ALTER TABLE tasks ADD COLUMN anchor_guide_file TEXT",
+            # Task 유형 (summarization | classification) — 기본값 summarization
+            "ALTER TABLE tasks ADD COLUMN task_type TEXT DEFAULT 'summarization'",
         ]
         for stmt in _migration_stmts:
             try:

@@ -11,6 +11,7 @@ import { fetchPhase5 } from '../../api/phases';
 import { downloadJSON, downloadXLSX } from '../../utils/download';
 import { fmtPct } from '../../utils/format';
 import { cn } from '../../utils/cn';
+import { useTaskStore } from '../../stores/taskStore';
 import type { CaseResult } from '../../types';
 
 const P5_COLUMNS: Column[] = [
@@ -58,8 +59,13 @@ const DETAIL_FIELDS = [
 export const Phase5Panel: React.FC = () => {
   const runStore = useRunStore();
   const ps = usePhaseStore();
+  const taskStore = useTaskStore();
   const runId = runStore.selectedRunId;
   const data = ps.p5Data;
+  const currentTask = taskStore.tasks.find((t) => t.id === taskStore.selectedTaskId);
+  // Phase 5 응답에 task_type이 있으면 우선 사용, 없으면 현재 task 사용
+  const dataAny = data as unknown as { task_type?: string } | null;
+  const isClassification = (dataAny?.task_type === 'classification') || (currentTask?.task_type === 'classification');
 
   // Auto-fetch Phase 5 data
   useEffect(() => {
@@ -73,6 +79,16 @@ export const Phase5Panel: React.FC = () => {
   const { filtered, setCol } = useTableFilter(sorted, ps.p5Filter, ps.setP5Filter);
 
   const scoreCards = useMemo(() => {
+    if (isClassification) {
+      if (!data?.scores) return [
+        { label: '정답%', value: '—', sub: '이번 Run', variant: 'good' as const },
+        { label: '오답%', value: '—', sub: '이번 Run', variant: 'bad' as const },
+      ];
+      return [
+        { label: '정답%', value: fmtPct(data.scores.correct), sub: '이번 Run', variant: 'good' as const },
+        { label: '오답%', value: fmtPct(data.scores.wrong), sub: '이번 Run', variant: 'bad' as const },
+      ];
+    }
     if (!data?.scores) return [
       { label: '정답+과답%', value: '—', sub: '이번 Run', variant: 'good' as const },
       { label: '정답%', value: '—', sub: '이번 Run', variant: 'default' as const },
@@ -85,7 +101,7 @@ export const Phase5Panel: React.FC = () => {
       { label: '과답%', value: fmtPct(data.scores.over), sub: '이번 Run', variant: 'warn' as const },
       { label: '오답%', value: fmtPct(data.scores.wrong), sub: '이번 Run', variant: 'bad' as const },
     ];
-  }, [data?.scores]);
+  }, [data?.scores, isClassification]);
 
   return (
     <div>
@@ -99,14 +115,14 @@ export const Phase5Panel: React.FC = () => {
             ? 'bg-[#dcfce7] text-[#166534] border-[#bbf7d0]'
             : 'bg-[#fef9c3] text-[#854d0e] border-[#fde68a]',
         )}
-        title={data.goal_achieved ? '목표 정답+과답 95%를 달성했습니다!' : `목표 정답+과답 95%까지 ${data.gap_to_goal?.toFixed(1) ?? '—'}%p 남았습니다`}>
+        title={data.goal_achieved ? `목표 ${isClassification ? '정답' : '정답+과답'} 95%를 달성했습니다!` : `목표 ${isClassification ? '정답' : '정답+과답'} 95%까지 ${data.gap_to_goal?.toFixed(1) ?? '—'}%p 남았습니다`}>
           {data.goal_achieved ? '🎉 목표 달성!' : `목표까지 ${data.gap_to_goal?.toFixed(1) ?? '—'}%p 부족`}
         </div>
       )}
 
       {/* Trend chart */}
       <div className="bg-warm-card rounded-[10px] p-4 mb-5 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
-        <h4 className="text-[13px] text-[#555] mb-3" title="모든 Run의 정답+과답% 변화를 추적합니다">Run별 성능 추이 (정답+과답%)</h4>
+        <h4 className="text-[13px] text-[#555] mb-3" title={`모든 Run의 ${isClassification ? '정답' : '정답+과답'}% 변화를 추적합니다`}>Run별 성능 추이 ({isClassification ? '정답' : '정답+과답'}%)</h4>
         <TrendLineChart labels={data?.trend?.labels || []} values={data?.trend?.values || []} />
       </div>
 

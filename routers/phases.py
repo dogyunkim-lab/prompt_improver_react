@@ -503,14 +503,22 @@ async def get_phase5(run_id: int):
                 "intermediate_outputs": io,
             })
 
+        # task_type 조회 (UI 표시 분기용)
+        async with db.execute(
+            "SELECT task_type FROM tasks WHERE id=?", (run["task_id"],)
+        ) as cursor:
+            t_row = await cursor.fetchone()
+        task_type = (t_row["task_type"] if t_row and "task_type" in t_row.keys() else None) or "summarization"
+
         # BUG-3: 프론트 기대 구조로 전면 수정
         output = {
             "scores": {
                 "correct_plus_over": scores["score_total"],
                 "correct": scores["score_correct"],
                 "over": scores["score_over"],
-                "wrong": round(100 - scores["score_correct"] - scores["score_over"], 1),
+                "wrong": scores.get("score_wrong", round(100 - scores["score_correct"] - scores["score_over"], 1)),
             },
+            "task_type": task_type,
             "delta": {
                 "improve": delta_rows.get("improved", 0),
                 "regress": delta_rows.get("regressed", 0),

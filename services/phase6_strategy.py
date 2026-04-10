@@ -309,7 +309,8 @@ async def run_phase6(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
             pass  # 마이그레이션 전 DB 호환
 
         yield collector.log("info", f"Delta 분석: {delta_summary}")
-        yield collector.log("info", "gpt-oss-120B에게 전략 수립 요청 중...")
+        model_display = (gpt_config or {}).get("model") or "gpt-oss-120B"
+        yield collector.log("info", f"{model_display}에게 전략 수립 요청 중...")
 
         prompt_template = load_prompt()
         prompt = prompt_template.format(

@@ -21,7 +21,7 @@ export const Phase6Panel: React.FC = () => {
   const currentTask = tasks.find((t) => t.id === selectedTaskId);
 
   const isRunning = ps.phaseStatus[6] === 'running';
-  const [reasoning, setReasoning] = useState('high');
+  const [reasoning, setReasoning] = useState('low');
   const data = ps.p6Data;
 
   // Load existing data

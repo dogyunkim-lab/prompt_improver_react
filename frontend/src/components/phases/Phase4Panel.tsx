@@ -91,8 +91,30 @@ export const Phase4Panel: React.FC = () => {
   const { sorted, toggleSort } = useTableSort(ps.p4Cases as any[], ps.p4Sort, ps.setP4Sort);
   const { filtered, setCol } = useTableFilter(sorted, ps.p4Filter, ps.setP4Filter);
 
+  const isClassification = currentTask?.task_type === 'classification';
   const scoreCards = useMemo(() => {
     const s = ps.p4Scores;
+    if (isClassification) {
+      if (!s) {
+        if (ps.p4Cases.length > 0) {
+          const total = ps.p4Cases.length;
+          const correct = ps.p4Cases.filter((c) => c.evaluation === '정답').length;
+          const wrong = ps.p4Cases.filter((c) => c.evaluation === '오답').length;
+          return [
+            { label: '정답%', value: fmtPct((correct / total) * 100), sub: '정확한 라벨', variant: 'good' as const, title: '핵심 지표. 라벨이 정답과 일치한 비율. 95% 이상이 목표입니다.' },
+            { label: '오답%', value: fmtPct((wrong / total) * 100), sub: '틀린 라벨', variant: 'bad' as const, title: '라벨이 정답과 불일치한 비율' },
+          ];
+        }
+        return [
+          { label: '정답%', value: '—', sub: '정확한 라벨', variant: 'good' as const, title: '핵심 지표. 라벨이 정답과 일치한 비율. 95% 이상이 목표입니다.' },
+          { label: '오답%', value: '—', sub: '틀린 라벨', variant: 'bad' as const, title: '라벨이 정답과 불일치한 비율' },
+        ];
+      }
+      return [
+        { label: '정답%', value: fmtPct(s.correct), sub: '정확한 라벨', variant: 'good' as const, title: '핵심 지표. 라벨이 정답과 일치한 비율. 95% 이상이 목표입니다.' },
+        { label: '오답%', value: fmtPct(s.wrong), sub: '틀린 라벨', variant: 'bad' as const, title: '라벨이 정답과 불일치한 비율' },
+      ];
+    }
     if (!s) {
       // Compute from cases if available
       if (ps.p4Cases.length > 0) {
@@ -120,7 +142,7 @@ export const Phase4Panel: React.FC = () => {
       { label: '과답%', value: fmtPct(s.over), sub: '과도한 답변', variant: 'warn' as const, title: '맞지만 불필요한 내용이 추가된 비율' },
       { label: '오답%', value: fmtPct(s.wrong), sub: '틀린 답변', variant: 'bad' as const, title: '핵심 내용이 누락되거나 틀린 비율' },
     ];
-  }, [ps.p4Scores, ps.p4Cases]);
+  }, [ps.p4Scores, ps.p4Cases, isClassification]);
 
   const onRun = useCallback(async () => {
     if (!runId) return;

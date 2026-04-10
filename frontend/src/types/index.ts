@@ -1,15 +1,21 @@
 /* ── Task ── */
+export type TaskType = 'summarization' | 'classification';
+
 export interface Task {
   id: number;
   name: string;
   description?: string;
   generation_task?: string;
+  task_type?: TaskType;
   gpt_api_base?: string;
   gpt_api_key?: string;
   gpt_model?: string;
   sim_api_base?: string;
   sim_api_key?: string;
   sim_model?: string;
+  judge_api_base?: string;
+  judge_api_key?: string;
+  judge_model?: string;
   anchor_guide_file?: string;
   created_at?: string;
   runs: Run[];

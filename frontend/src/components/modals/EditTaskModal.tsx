@@ -9,6 +9,7 @@ export const EditTaskModal: React.FC = () => {
   const { updateTask } = useTaskStore();
   const [name, setName] = useState('');
   const [desc, setDesc] = useState('');
+  const [taskType, setTaskType] = useState<'summarization' | 'classification'>('summarization');
   const [genType, setGenType] = useState('');
   const [gptBase, setGptBase] = useState('');
   const [gptKey, setGptKey] = useState('');
@@ -16,10 +17,14 @@ export const EditTaskModal: React.FC = () => {
   const [simBase, setSimBase] = useState('');
   const [simKey, setSimKey] = useState('');
   const [simModel, setSimModel] = useState('');
+  const [judgeBase, setJudgeBase] = useState('');
+  const [judgeKey, setJudgeKey] = useState('');
+  const [judgeModel, setJudgeModel] = useState('');
   const [anchorFile, setAnchorFile] = useState('');
   const [anchorOptions, setAnchorOptions] = useState<{ filename: string; name: string }[]>([]);
   const [showLLM, setShowLLM] = useState(false);
   const [showSimLLM, setShowSimLLM] = useState(false);
+  const [showJudgeLLM, setShowJudgeLLM] = useState(false);
   const [showAnchor, setShowAnchor] = useState(false);
 
   useEffect(() => {
@@ -32,6 +37,7 @@ export const EditTaskModal: React.FC = () => {
     if (editingTask) {
       setName(editingTask.name || '');
       setDesc(editingTask.description || '');
+      setTaskType((editingTask.task_type as 'summarization' | 'classification') || 'summarization');
       setGenType(editingTask.generation_task || '');
       setGptBase(editingTask.gpt_api_base || '');
       setGptKey(editingTask.gpt_api_key || '');
@@ -39,9 +45,13 @@ export const EditTaskModal: React.FC = () => {
       setSimBase(editingTask.sim_api_base || '');
       setSimKey(editingTask.sim_api_key || '');
       setSimModel(editingTask.sim_model || '');
+      setJudgeBase(editingTask.judge_api_base || '');
+      setJudgeKey(editingTask.judge_api_key || '');
+      setJudgeModel(editingTask.judge_model || '');
       setAnchorFile(editingTask.anchor_guide_file || '');
       setShowLLM(!!(editingTask.gpt_api_base || editingTask.gpt_api_key || editingTask.gpt_model));
       setShowSimLLM(!!(editingTask.sim_api_base || editingTask.sim_api_key || editingTask.sim_model));
+      setShowJudgeLLM(!!(editingTask.judge_api_base || editingTask.judge_api_key || editingTask.judge_model));
       setShowAnchor(!!editingTask.anchor_guide_file);
     }
   }, [editingTask]);
@@ -53,6 +63,7 @@ export const EditTaskModal: React.FC = () => {
       await updateTask(editingTask.id, {
         name: name.trim(),
         description: desc.trim() || undefined,
+        task_type: taskType,
         generation_task: genType.trim() || undefined,
         gpt_api_base: gptBase.trim(),
         gpt_api_key: gptKey.trim(),
@@ -60,6 +71,9 @@ export const EditTaskModal: React.FC = () => {
         sim_api_base: simBase.trim(),
         sim_api_key: simKey.trim(),
         sim_model: simModel.trim(),
+        judge_api_base: judgeBase.trim(),
+        judge_api_key: judgeKey.trim(),
+        judge_model: judgeModel.trim(),
         anchor_guide_file: anchorFile || '',
       });
       closeModal();
@@ -68,7 +82,7 @@ export const EditTaskModal: React.FC = () => {
     } finally {
       setSubmitting(false);
     }
-  }, [editingTask, name, desc, genType, gptBase, gptKey, gptModel, simBase, simKey, simModel, anchorFile, updateTask, closeModal, setSubmitting]);
+  }, [editingTask, name, desc, taskType, genType, gptBase, gptKey, gptModel, simBase, simKey, simModel, judgeBase, judgeKey, judgeModel, anchorFile, updateTask, closeModal, setSubmitting]);
 
   return (
     <Modal
@@ -107,6 +121,28 @@ export const EditTaskModal: React.FC = () => {
         />
       </div>
       <div className="mb-3.5">
+        <label className="block text-xs text-[#666] mb-1 font-semibold" title="Task 유형을 선택합니다. Summarization은 LLM Judge로 정답/과답/오답 판정, Classification은 텍스트 일치 비교로 정답/오답 판정합니다.">Task 유형 *</label>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            className={`flex-1 py-2 px-3 rounded-[7px] text-[13px] font-semibold border ${taskType === 'summarization' ? 'bg-ctp-mauve text-ctp-base border-ctp-mauve' : 'bg-warm-hover text-warm-text border-warm-border hover:border-ctp-mauve'}`}
+            onClick={() => setTaskType('summarization')}
+            title="STT 등의 입력으로부터 요약을 생성하는 Task. Phase 4에서 LLM Judge로 정답/과답/오답을 판정합니다."
+          >Summarization</button>
+          <button
+            type="button"
+            className={`flex-1 py-2 px-3 rounded-[7px] text-[13px] font-semibold border ${taskType === 'classification' ? 'bg-ctp-mauve text-ctp-base border-ctp-mauve' : 'bg-warm-hover text-warm-text border-warm-border hover:border-ctp-mauve'}`}
+            onClick={() => setTaskType('classification')}
+            title="STT 등의 입력으로부터 라벨을 생성하는 Task. Phase 4에서 reference와 generated 텍스트 일치 비교로 정답/오답을 판정합니다."
+          >Classification</button>
+        </div>
+        <p className="text-[11px] text-[#888] mt-1">
+          {taskType === 'summarization'
+            ? 'Summarization: Phase 4 LLM Judge 사용 (정답/과답/오답)'
+            : 'Classification: Phase 4 텍스트 일치 비교 (정답/오답)'}
+        </p>
+      </div>
+      <div className="mb-3.5">
         <label className="block text-xs text-[#666] mb-1 font-semibold" title="이 실험에서 다루는 요약 종류 (예: 민원내용). GPT가 분석 시 참고합니다.">요약 유형</label>
         <input
           className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-mauve focus:outline-none"
@@ -119,8 +155,8 @@ export const EditTaskModal: React.FC = () => {
           type="button"
           className="text-xs text-ctp-mauve font-semibold hover:underline"
           onClick={() => setShowLLM(!showLLM)}
-          title="GPT 분석에 사용할 모델을 지정합니다. 비워두면 서버 기본값을 사용합니다."
-        >{showLLM ? '▾ LLM 설정 접기' : '▸ LLM 설정 (선택)'}</button>
+          title="Phase 1/2/6 분석에 사용할 LLM을 지정합니다. 비워두면 서버 기본값을 사용합니다."
+        >{showLLM ? '▾ 분석 LLM 설정 접기' : '▸ 분석 LLM 설정 (Phase 1/2/6)'}</button>
       </div>
       {showLLM && (
         <div className="pl-2 border-l-2 border-ctp-mauve/30 mb-3.5 space-y-2.5">
@@ -191,6 +227,47 @@ export const EditTaskModal: React.FC = () => {
               placeholder="예: qwen3.5-35B-A3B"
               value={simModel}
               onChange={(e) => setSimModel(e.target.value)}
+            />
+          </div>
+        </div>
+      )}
+      <div className="mb-1">
+        <button
+          type="button"
+          className="text-xs text-ctp-blue font-semibold hover:underline"
+          onClick={() => setShowJudgeLLM(!showJudgeLLM)}
+          title="Phase 4 Judge에 사용할 LLM. Judge는 GPT 기준으로 설계되었으므로 GPT 권장. 비워두면 분석 LLM 설정을 사용합니다."
+        >{showJudgeLLM ? '▾ Judge LLM 설정 접기' : '▸ Judge LLM 설정 (Phase 4 — GPT 권장)'}</button>
+      </div>
+      {showJudgeLLM && (
+        <div className="pl-2 border-l-2 border-ctp-blue/30 mb-3.5 space-y-2.5">
+          <p className="text-[11px] text-[#888]">Phase 4 Judge 판정 및 Phase 2 mini-validation 판정에 사용. Judge 프롬프트는 GPT 기준으로 설계되어 있으므로 GPT 계열 권장. 비워두면 분석 LLM 설정으로 폴백합니다.</p>
+          <div>
+            <label className="block text-xs text-[#666] mb-1 font-semibold">API Base URL</label>
+            <input
+              className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-blue focus:outline-none"
+              placeholder="비워두면 분석 LLM 설정 사용"
+              value={judgeBase}
+              onChange={(e) => setJudgeBase(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-[#666] mb-1 font-semibold">API Key</label>
+            <input
+              type="password"
+              className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-blue focus:outline-none"
+              placeholder="비워두면 분석 LLM 설정 사용"
+              value={judgeKey}
+              onChange={(e) => setJudgeKey(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-[#666] mb-1 font-semibold">모델명</label>
+            <input
+              className="w-full py-2 px-3 border border-warm-border rounded-[7px] bg-warm-hover text-warm-text text-[13px] focus:border-ctp-blue focus:outline-none"
+              placeholder="예: gpt-oss-120b-26"
+              value={judgeModel}
+              onChange={(e) => setJudgeModel(e.target.value)}
             />
           </div>
         </div>

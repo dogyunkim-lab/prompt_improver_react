@@ -11,8 +11,10 @@ export function fetchAnchorList(): Promise<{ filename: string; name: string }[]>
 
 export function createTask(data: {
   name: string; description?: string; generation_task?: string;
+  task_type?: 'summarization' | 'classification';
   gpt_api_base?: string; gpt_api_key?: string; gpt_model?: string;
   sim_api_base?: string; sim_api_key?: string; sim_model?: string;
+  judge_api_base?: string; judge_api_key?: string; judge_model?: string;
   anchor_guide_file?: string;
 }): Promise<Task> {
   return apiFetch<Task>('/api/tasks', {
@@ -24,8 +26,10 @@ export function createTask(data: {
 
 export function updateTask(id: number, data: {
   name?: string; description?: string; generation_task?: string;
+  task_type?: 'summarization' | 'classification';
   gpt_api_base?: string; gpt_api_key?: string; gpt_model?: string;
   sim_api_base?: string; sim_api_key?: string; sim_model?: string;
+  judge_api_base?: string; judge_api_key?: string; judge_model?: string;
   anchor_guide_file?: string;
 }): Promise<Task> {
   return apiFetch<Task>(`/api/tasks/${id}`, {

@@ -96,7 +96,7 @@ export const Phase1Panel: React.FC = () => {
   const [judgeFileName, setJudgeFileName] = useState<string | null>(null);
   const [promptFileName, setPromptFileName] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [reasoning, setReasoning] = useState('high');
+  const [reasoning, setReasoning] = useState('low');
 
   const isRunning = phaseStatus[1] === 'running';
 
@@ -152,8 +152,19 @@ export const Phase1Panel: React.FC = () => {
   const { sorted, toggleSort } = useTableSort(p1Cases as any[], p1Sort, setP1Sort);
   const { filtered, setCol } = useTableFilter(sorted, p1Filter, setP1Filter);
 
+  const isClassification = currentTask?.task_type === 'classification';
   const scoreCards = useMemo(() => {
     const s = p1Scores;
+    if (isClassification) {
+      if (!s) return [
+        { label: '정답%', value: '—', sub: '정확한 라벨', variant: 'good' as const, title: '핵심 지표. 라벨이 정답과 일치한 비율. 95% 이상이 목표입니다.' },
+        { label: '오답%', value: '—', sub: '틀린 라벨', variant: 'bad' as const, title: '라벨이 정답과 불일치한 비율' },
+      ];
+      return [
+        { label: '정답%', value: fmtPct(s.correct), sub: '정확한 라벨', variant: 'good' as const, title: '핵심 지표. 라벨이 정답과 일치한 비율. 95% 이상이 목표입니다.' },
+        { label: '오답%', value: fmtPct(s.wrong), sub: '틀린 라벨', variant: 'bad' as const, title: '라벨이 정답과 불일치한 비율' },
+      ];
+    }
     if (!s) return [
       { label: '정답+과답%', value: '—', sub: '정답 + 과답', variant: 'good' as const, title: '핵심 지표. 이 비율을 95% 이상으로 올리는 것이 목표입니다.' },
       { label: '정답%', value: '—', sub: '정확한 답변', variant: 'default' as const, title: 'Reference와 동일한 핵심 내용을 요약한 비율' },
@@ -166,7 +177,7 @@ export const Phase1Panel: React.FC = () => {
       { label: '과답%', value: fmtPct(s.over), sub: '과도한 답변', variant: 'warn' as const, title: '맞지만 불필요한 내용이 추가된 비율' },
       { label: '오답%', value: fmtPct(s.wrong), sub: '틀린 답변', variant: 'bad' as const, title: '핵심 내용이 누락되거나 틀린 비율' },
     ];
-  }, [p1Scores]);
+  }, [p1Scores, isClassification]);
 
   const onUploadJudge = useCallback(async () => {
     if (!runId || !judgeFile) return;

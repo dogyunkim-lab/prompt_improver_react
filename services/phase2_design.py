@@ -1,10 +1,11 @@
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime
 from typing import AsyncGenerator
 from database import get_db
-from services.gpt_client import call_gpt, get_task_gpt_config, get_task_sim_config
+from services.gpt_client import call_gpt, get_task_gpt_config, get_task_sim_config, get_task_judge_config, get_task_type
 from services.delta import compute_learning_rate, count_completed_runs
 from services.experiment_history import build_experiment_history
 from services.sse_helpers import log_event, result_event, done_event, LogCollector
@@ -850,10 +851,33 @@ async def _simulate_workflow_for_case(
     return last_result
 
 
+def _normalize_label_p2(text: str) -> str:
+    """Classification 라벨 정규화 (phase4_judge._normalize_label과 동일)."""
+    s = (text or "").strip().lower()
+    s = s.strip("\"'`.,;:!?()[]{}<>「」『』〔〕【】")
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _exact_match_judge_p2(reference: str, generated: str) -> tuple[str, str]:
+    """Classification 전용 텍스트 일치 판정 (phase4와 동일 로직)."""
+    ref = _normalize_label_p2(reference)
+    gen = _normalize_label_p2(generated)
+    if not ref:
+        if not gen:
+            return "정답", "reference 없음 — generated도 없음"
+        return "오답", "reference 없음 — generated가 불필요한 라벨 생성"
+    if not gen:
+        return "오답", "라벨 없음"
+    if ref == gen:
+        return "정답", "라벨 일치"
+    return "오답", "라벨 불일치"
+
+
 async def _mini_judge(
     case: dict, generated: str,
     judge_sys: str, judge_user_tmpl: str,
-    gpt_config: dict | None = None,
+    judge_config: dict | None = None,
 ) -> tuple[str, str]:
     """Phase 4 Judge 프롬프트로 간이 판정. (evaluation, reason) 튜플 반환."""
     try:
@@ -879,7 +903,7 @@ async def _mini_judge(
     messages.append({"role": "user", "content": user_content})
 
     try:
-        raw = await call_gpt(messages, reasoning="low", **(gpt_config or {}))
+        raw = await call_gpt(messages, reasoning="low", **(judge_config or {}))
         result = _extract_judge_json(raw)
         evaluation = result.get("rating", "평가실패")
         reason = result.get("reason", "")
@@ -894,25 +918,32 @@ async def _mini_judge(
 
 async def _run_mini_validation(
     candidates: list, validation_cases: list,
-    gpt_config: dict | None = None,
+    judge_config: dict | None = None,
     sim_config: dict | None = None,
     concurrency: int = 5,
+    task_type: str = "summarization",
 ) -> list[dict]:
     """모든 후보에 대해 validation_cases로 시뮬+판정 수행.
     - 워크플로우 시뮬레이션: sim_config (생성 모델, 예: qwen3.5-35B-A3B)
-    - Judge 판정: gpt_config (분석 모델, 예: gpt-oss-120B)
+    - Judge 판정: judge_config (Judge LLM, 예: gpt-oss-120B) — summarization 전용
+    - classification: LLM Judge 대신 텍스트 일치 비교 사용
     각 후보에 mini_validation 필드를 부착하고, pass_rate 내림차순 정렬하여 반환."""
-    # Judge 프롬프트 1회 로드
-    try:
-        judge_sys = _load_prompt(JUDGE_SYSTEM_PROMPT_PATH)
-        judge_user_tmpl = _load_prompt(JUDGE_USER_PROMPT_PATH)
-    except FileNotFoundError:
-        logger.warning("[mini-validation] Judge 프롬프트 파일 없음 — validation 스킵")
-        return candidates
+    is_classification = task_type == "classification"
 
-    if not judge_user_tmpl:
-        logger.warning("[mini-validation] Judge user 프롬프트 비어있음 — validation 스킵")
-        return candidates
+    # Judge 프롬프트 1회 로드 (summarization만 필요)
+    judge_sys = ""
+    judge_user_tmpl = ""
+    if not is_classification:
+        try:
+            judge_sys = _load_prompt(JUDGE_SYSTEM_PROMPT_PATH)
+            judge_user_tmpl = _load_prompt(JUDGE_USER_PROMPT_PATH)
+        except FileNotFoundError:
+            logger.warning("[mini-validation] Judge 프롬프트 파일 없음 — validation 스킵")
+            return candidates
+
+        if not judge_user_tmpl:
+            logger.warning("[mini-validation] Judge user 프롬프트 비어있음 — validation 스킵")
+            return candidates
 
     semaphore = asyncio.Semaphore(concurrency)
 
@@ -921,8 +952,11 @@ async def _run_mini_validation(
             try:
                 # 워크플로우 시뮬레이션은 sim_config (생성 모델) 사용
                 generated = await _simulate_workflow_for_case(candidate, case, sim_config)
-                # Judge 판정은 gpt_config (분석 모델) 사용
-                evaluation, reason = await _mini_judge(case, generated, judge_sys, judge_user_tmpl, gpt_config)
+                # Judge 판정: classification은 텍스트 일치, summarization은 LLM Judge
+                if is_classification:
+                    evaluation, reason = _exact_match_judge_p2(case.get("reference", ""), generated)
+                else:
+                    evaluation, reason = await _mini_judge(case, generated, judge_sys, judge_user_tmpl, judge_config)
                 return {
                     "case_id": case.get("case_id", ""),
                     "evaluation": evaluation,
@@ -956,7 +990,9 @@ async def _run_mini_validation(
                 clean_details.append(d)
 
         total = len(clean_details)
-        passed = sum(1 for d in clean_details if d["evaluation"] in ("정답", "과답"))
+        # classification: '정답'만 통과로 인정, summarization: '정답' + '과답' 통과
+        positive_set = ("정답",) if is_classification else ("정답", "과답")
+        passed = sum(1 for d in clean_details if d["evaluation"] in positive_set)
         pass_rate = round(passed / total, 2) if total > 0 else 0.0
 
         candidate["mini_validation"] = {
@@ -1038,10 +1074,14 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
         async with db.execute("SELECT * FROM tasks WHERE id=?", (run["task_id"],)) as cursor:
             task = dict(await cursor.fetchone())
 
-        # 실험별 GPT 설정 로드
+        # 실험별 GPT 설정 로드 (분석용 — 전략 수립, 후보 생성, 검증보정)
         gpt_config = await get_task_gpt_config(run_id)
+        # Judge LLM 설정 로드 (mini-validation 판정용 — 폴백: gpt_config)
+        judge_config = await get_task_judge_config(run_id)
         # 시뮬레이션(생성) 모델 설정 로드 (mini-validation용)
         sim_config = await get_task_sim_config(run_id)
+        # Task 유형 (summarization | classification)
+        task_type = await get_task_type(run_id)
 
         # Phase 1 결과 조회
         async with db.execute(
@@ -1253,7 +1293,7 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                 yield collector.log("warn", "Step 4/4: Mini-validation — 시뮬레이션 LLM 미설정, 기본 GPT로 시뮬레이션 수행")
                 yield collector.log("info", f"Mini-validation 시작 ({len(validation_cases)}건 케이스, {len(final_candidates)}개 후보)")
 
-            final_candidates = await _run_mini_validation(final_candidates, validation_cases, gpt_config=gpt_config, sim_config=sim_config)
+            final_candidates = await _run_mini_validation(final_candidates, validation_cases, judge_config=judge_config, sim_config=sim_config, task_type=task_type)
 
             # 결과 로깅
             for cand in final_candidates:
@@ -1333,7 +1373,8 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                     yield collector.log("info", f"재시도 mini-validation ({len(validated_retry)}개 후보)")
                     validated_retry = await _run_mini_validation(
                         validated_retry, validation_cases,
-                        gpt_config=gpt_config, sim_config=sim_config,
+                        judge_config=judge_config, sim_config=sim_config,
+                        task_type=task_type,
                     )
 
                     for cand in validated_retry:
