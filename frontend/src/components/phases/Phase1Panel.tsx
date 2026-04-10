@@ -12,7 +12,7 @@ import { DataTable, type Column } from '../shared/DataTable';
 import { CaseDetail } from '../shared/CaseDetail';
 import { EvalBarChart } from '../charts/EvalBarChart';
 import { BucketBarChart } from '../charts/BucketBarChart';
-import { uploadJudge, uploadPrompt } from '../../api/uploads';
+import { uploadJudge, uploadJudgeXLSX, uploadPrompt } from '../../api/uploads';
 import { runPhase, cancelPhase } from '../../api/phases';
 import { downloadJSON, downloadXLSX } from '../../utils/download';
 import { fmtPct } from '../../utils/format';
@@ -183,14 +183,17 @@ export const Phase1Panel: React.FC = () => {
     if (!runId || !judgeFile) return;
     setUploading(true);
     try {
-      const res = await uploadJudge(runId, judgeFile);
-      setJudgeFileName(res.original_name);
+      const res = isClassification
+        ? await uploadJudgeXLSX(runId, judgeFile)
+        : await uploadJudge(runId, judgeFile);
+      // 표시는 사용자가 올린 원본 파일명으로
+      setJudgeFileName(judgeFile.name || res.original_name);
     } catch (e) {
       alert('업로드 오류: ' + (e as Error).message);
     } finally {
       setUploading(false);
     }
-  }, [runId, judgeFile]);
+  }, [runId, judgeFile, isClassification]);
 
   const onUploadPrompt = useCallback(async () => {
     if (!runId || !promptFile) return;
@@ -243,12 +246,29 @@ export const Phase1Panel: React.FC = () => {
 
       {/* Upload sections */}
       <div className="bg-warm-card rounded-[10px] p-4 mb-4 shadow-[0_1px_4px_rgba(0,0,0,0.07)]">
-        <h4 className="text-[13px] text-[#555] mb-3" title="LLM Judge가 판정한 결과 JSON 파일을 업로드합니다. 각 케이스의 정답/오답/과답 판정이 포함되어야 합니다.">Judge JSON 업로드</h4>
-        <FileDropZone
-          onFile={(f) => setJudgeFile(f)}
-          accept=".json"
-          fileName={judgeFileName}
-        />
+        {isClassification ? (
+          <>
+            <h4 className="text-[13px] text-[#555] mb-1" title="Classification 입력 XLSX 또는 CSV 파일을 업로드합니다. 컬럼 순서대로 A=id, B=stt, C=reference, D=generated.">Classification 데이터 XLSX/CSV 업로드</h4>
+            <p className="text-[11px] text-warm-muted mb-2">
+              컬럼 순서: <strong>A=id</strong>, <strong>B=stt</strong>, <strong>C=reference</strong>, <strong>D=generated</strong> (열 이름이 아닌 순서로 파싱). reference와 generated가 일치하면 정답, 다르면 오답으로 판정됩니다.
+            </p>
+            <FileDropZone
+              onFile={(f) => setJudgeFile(f)}
+              accept=".xlsx,.csv"
+              label="XLSX 또는 CSV 파일 드래그 또는 클릭"
+              fileName={judgeFileName}
+            />
+          </>
+        ) : (
+          <>
+            <h4 className="text-[13px] text-[#555] mb-3" title="LLM Judge가 판정한 결과 JSON 파일을 업로드합니다. 각 케이스의 정답/오답/과답 판정이 포함되어야 합니다.">Judge JSON 업로드</h4>
+            <FileDropZone
+              onFile={(f) => setJudgeFile(f)}
+              accept=".json"
+              fileName={judgeFileName}
+            />
+          </>
+        )}
         <div className="flex items-center gap-3 mt-2">
           <button
             className="py-2 px-4 bg-ctp-mauve text-ctp-base rounded-md font-semibold text-[13px] hover:opacity-85 disabled:opacity-50"

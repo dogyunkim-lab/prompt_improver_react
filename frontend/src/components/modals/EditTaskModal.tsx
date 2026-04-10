@@ -63,7 +63,6 @@ export const EditTaskModal: React.FC = () => {
       await updateTask(editingTask.id, {
         name: name.trim(),
         description: desc.trim() || undefined,
-        task_type: taskType,
         generation_task: genType.trim() || undefined,
         gpt_api_base: gptBase.trim(),
         gpt_api_key: gptKey.trim(),
@@ -82,7 +81,7 @@ export const EditTaskModal: React.FC = () => {
     } finally {
       setSubmitting(false);
     }
-  }, [editingTask, name, desc, taskType, genType, gptBase, gptKey, gptModel, simBase, simKey, simModel, judgeBase, judgeKey, judgeModel, anchorFile, updateTask, closeModal, setSubmitting]);
+  }, [editingTask, name, desc, genType, gptBase, gptKey, gptModel, simBase, simKey, simModel, judgeBase, judgeKey, judgeModel, anchorFile, updateTask, closeModal, setSubmitting]);
 
   return (
     <Modal
@@ -121,25 +120,23 @@ export const EditTaskModal: React.FC = () => {
         />
       </div>
       <div className="mb-3.5">
-        <label className="block text-xs text-[#666] mb-1 font-semibold" title="Task 유형을 선택합니다. Summarization은 LLM Judge로 정답/과답/오답 판정, Classification은 텍스트 일치 비교로 정답/오답 판정합니다.">Task 유형 *</label>
+        <label className="block text-xs text-[#666] mb-1 font-semibold" title="Task 유형은 새 실험 생성 시 한 번만 설정 가능하며, 이후 변경할 수 없습니다.">Task 유형 (변경 불가)</label>
         <div className="flex gap-2">
           <button
             type="button"
-            className={`flex-1 py-2 px-3 rounded-[7px] text-[13px] font-semibold border ${taskType === 'summarization' ? 'bg-ctp-mauve text-ctp-base border-ctp-mauve' : 'bg-warm-hover text-warm-text border-warm-border hover:border-ctp-mauve'}`}
-            onClick={() => setTaskType('summarization')}
-            title="STT 등의 입력으로부터 요약을 생성하는 Task. Phase 4에서 LLM Judge로 정답/과답/오답을 판정합니다."
+            disabled
+            className={`flex-1 py-2 px-3 rounded-[7px] text-[13px] font-semibold border cursor-not-allowed ${taskType === 'summarization' ? 'bg-ctp-mauve/60 text-ctp-base border-ctp-mauve/60' : 'bg-warm-hover/40 text-warm-muted border-warm-border opacity-50'}`}
+            title="Summarization 유형 (변경 불가)"
           >Summarization</button>
           <button
             type="button"
-            className={`flex-1 py-2 px-3 rounded-[7px] text-[13px] font-semibold border ${taskType === 'classification' ? 'bg-ctp-mauve text-ctp-base border-ctp-mauve' : 'bg-warm-hover text-warm-text border-warm-border hover:border-ctp-mauve'}`}
-            onClick={() => setTaskType('classification')}
-            title="STT 등의 입력으로부터 라벨을 생성하는 Task. Phase 4에서 reference와 generated 텍스트 일치 비교로 정답/오답을 판정합니다."
+            disabled
+            className={`flex-1 py-2 px-3 rounded-[7px] text-[13px] font-semibold border cursor-not-allowed ${taskType === 'classification' ? 'bg-ctp-mauve/60 text-ctp-base border-ctp-mauve/60' : 'bg-warm-hover/40 text-warm-muted border-warm-border opacity-50'}`}
+            title="Classification 유형 (변경 불가)"
           >Classification</button>
         </div>
         <p className="text-[11px] text-[#888] mt-1">
-          {taskType === 'summarization'
-            ? 'Summarization: Phase 4 LLM Judge 사용 (정답/과답/오답)'
-            : 'Classification: Phase 4 텍스트 일치 비교 (정답/오답)'}
+          Task 유형은 새 실험 생성 시에만 설정할 수 있으며, 이후에는 변경할 수 없습니다.
         </p>
       </div>
       <div className="mb-3.5">
