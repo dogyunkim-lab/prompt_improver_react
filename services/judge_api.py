@@ -125,6 +125,10 @@ async def call_judge_api(
     """Judge API 호출. 응답 dict 반환.
 
     실패 시 JudgeAPIError 발생.
+
+    주의: JudgeRequest 의 'id' 필드는 **case ID 필터** (--id 인자) 입니다.
+    내부 추적용 request_id 를 절대 'id' 로 보내면 안 됩니다.
+    request_id 는 클라이언트 측 로깅 용도로만 사용됩니다.
     """
     body: dict = {
         "input_file": input_file,
@@ -134,8 +138,8 @@ async def call_judge_api(
         "model": model or JUDGE_API_MODEL,
         "workers": workers or JUDGE_API_WORKERS,
     }
-    if request_id:
-        body["id"] = request_id
+    # request_id 는 의도적으로 body 에 포함하지 않습니다 (위 docstring 참고).
+    _ = request_id
 
     use_timeout = timeout or JUDGE_API_TIMEOUT
     try:
