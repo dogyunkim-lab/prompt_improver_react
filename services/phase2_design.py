@@ -1,9 +1,13 @@
 import asyncio
+import hashlib
 import json
 import logging
 import re
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import AsyncGenerator
+from config import JUDGE_API_MODEL, JUDGE_API_URL, JUDGE_IO_DIR
 from database import get_db
 from services.gpt_client import call_gpt, get_task_gpt_config, get_task_sim_config, get_task_type, get_task_labels
 from services.delta import compute_learning_rate, count_completed_runs
@@ -11,7 +15,10 @@ from services.experiment_history import build_experiment_history
 from services.sse_helpers import log_event, result_event, done_event, LogCollector
 from services.judge_api import (
     JudgeAPIError,
-    run_judge_for_cases,
+    cases_to_xlsx,
+    call_judge_api,
+    ensure_io_dir,
+    read_merged_final,
     validate_generation_task,
 )
 
@@ -1166,18 +1173,37 @@ async def _judge_candidate_cases_via_api(
     sim_results: list[dict],
     generation_task: str,
     run_id: int,
+    diag: list[tuple[str, str]] | None = None,
 ) -> tuple[list[dict], str | None]:
     """sim_results 를 Judge API로 일괄 판정.
 
+    흐름 (api_explain.md 기준, Phase 4 와 동일):
+      1) sim_results → input.xlsx (id, stt, generated, reference, keywords)
+      2) POST {JUDGE_API_URL} (input_file=절대경로, output_dir=절대경로)
+      3) output_dir/merged_final.json 파싱
+      4) 응답 cases 의 (id, answer_evaluation, answer_evaluation_reason) 를 details 로 매핑
+
+    diag (선택): (level, message) 튜플을 append 하는 진단 로그 컬렉터.
+      - 입력 xlsx 경로/크기/SHA, 첫 케이스 generated 미리보기
+      - 응답 mtime/SHA, 첫 응답 케이스의 평가/사유
+      caller (run_phase2) 가 SSE 로그로 yield 한다.
+
     Returns: (details, judge_error)
-      - details: 각 case 의 판정 결과 dict 목록
-      - judge_error: API 호출 자체가 실패한 경우 에러 메시지, 정상이면 None
     """
-    # API 입력용 dict (case_id 키 사용)
-    # ── 중복/빈 case_id 가 있으면 mini-validation 전용 prefix 로 강제 고유화 ──
-    # (Judge API 응답을 case_id 로 매핑할 때 충돌하면 모든 detail 의 reason 이
-    #  마지막 한 건의 값으로 덮어써져, reference/generated 와 무관한 사유가 표시됨)
-    api_cases = []
+    def _log(level: str, msg: str) -> None:
+        if diag is not None:
+            diag.append((level, msg))
+        if level == "warn":
+            logger.warning(msg)
+        elif level == "error":
+            logger.error(msg)
+        else:
+            logger.info(msg)
+
+    # ── 1) input dict 구성 (case_id 중복/빈 값 안전화) ─────────────
+    # Judge API 응답을 id 로 매핑할 때 충돌하면 모든 detail 의 reason 이
+    # 한 건의 값으로 덮어써져, reference/generated 와 무관한 사유가 표시됨.
+    api_cases: list[dict] = []
     seen_ids: set[str] = set()
     rewritten_count = 0
     effective_ids: list[str] = []
@@ -1201,23 +1227,96 @@ async def _judge_candidate_cases_via_api(
             "generated": r.get("generated", ""),
         })
     if rewritten_count > 0:
-        logger.warning(
-            f"[mini-validation] 후보 {candidate_label}: sim_results 의 case_id 가 비었거나 중복 "
+        _log(
+            "warn",
+            f"[mv-diag {candidate_label}] sim_results 의 case_id 가 비었거나 중복 "
             f"({rewritten_count}/{len(sim_results)}건) — mv-prefix 로 강제 고유화"
         )
 
-    sub_dir = f"phase2/run_{run_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}_cand_{candidate_label}"
+    # ── 2) Phase 1/Phase 4 와 동일하게 sub_dir / xlsx 경로 준비 ─────
+    ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')
+    sub_dir = f"phase2/run_{run_id}_{ts}_cand_{candidate_label}"
+    request_id = f"run{run_id}_cand{candidate_label}_{ts}"
 
     try:
-        judge_cases, _summary = await run_judge_for_cases(
-            cases=api_cases,
-            generation_task=generation_task,
-            sub_dir=sub_dir,
-            request_id=f"run{run_id}_cand{candidate_label}",
+        work_dir = ensure_io_dir(sub_dir)
+        input_path = work_dir / "input.xlsx"
+        loop = asyncio.get_running_loop()
+        abs_input = await loop.run_in_executor(
+            None, cases_to_xlsx, api_cases, str(input_path)
         )
+
+        # 진단: 입력 파일 메타 + 첫 케이스 미리보기
+        try:
+            input_size = Path(abs_input).stat().st_size
+            with open(abs_input, "rb") as fh:
+                input_hash = hashlib.sha256(fh.read()).hexdigest()[:16]
+        except Exception as _e:
+            input_size, input_hash = -1, "?"
+        _log(
+            "info",
+            f"[mv-diag {candidate_label}] 입력 xlsx 작성 — {abs_input} "
+            f"({input_size:,} bytes, SHA256(앞16)={input_hash}, 케이스={len(api_cases)}건)"
+        )
+        for c in api_cases[:2]:
+            stt_p = (c.get("stt") or "").replace("\n", " ")[:80]
+            ref_p = (c.get("reference") or "").replace("\n", " ")[:80]
+            gen_p = (c.get("generated") or "").replace("\n", " ")[:80]
+            _log(
+                "info",
+                f"  └ id={c['case_id']} stt={stt_p!r} ref={ref_p!r} gen={gen_p!r}"
+            )
+
+        # ── 3) Judge API 호출 ────────────────────────────────────
+        call_started = time.monotonic()
+        wall_started = time.time()
+        _log(
+            "info",
+            f"[mv-diag {candidate_label}] Judge API POST → output_dir={work_dir.resolve()} "
+            f"request_id={request_id}"
+        )
+
+        await call_judge_api(
+            input_file=abs_input,
+            generation_task=generation_task,
+            output_dir=str(work_dir.resolve()),
+            request_id=request_id,
+        )
+
+        elapsed = time.monotonic() - call_started
+
+        # ── 4) merged_final.json 검증 (mtime 이 호출 이후인지) ───────
+        merged_path = Path(work_dir) / "merged_final.json"
+        if not merged_path.exists():
+            err_msg = f"merged_final.json 이 생성되지 않았습니다: {merged_path}"
+            _log("error", f"[mv-diag {candidate_label}] {err_msg}")
+            raise JudgeAPIError(err_msg)
+        merged_mtime = merged_path.stat().st_mtime
+        merged_size = merged_path.stat().st_size
+        with open(merged_path, "rb") as fh:
+            merged_hash = hashlib.sha256(fh.read()).hexdigest()[:16]
+        if merged_mtime < wall_started - 1.0:
+            _log(
+                "warn",
+                f"[mv-diag {candidate_label}] merged_final.json mtime 이 호출 이전 "
+                f"— 캐시된 파일일 수 있음 "
+                f"(mtime={datetime.fromtimestamp(merged_mtime).isoformat()}, "
+                f"call_started={datetime.fromtimestamp(wall_started).isoformat()})"
+            )
+        else:
+            _log(
+                "info",
+                f"[mv-diag {candidate_label}] merged_final.json 신규 작성 확인 "
+                f"({merged_size:,} bytes, SHA256(앞16)={merged_hash}, 응답시간 {elapsed:.2f}s)"
+            )
+
+        summary, judge_cases = await loop.run_in_executor(
+            None, read_merged_final, str(work_dir.resolve())
+        )
+
     except JudgeAPIError as e:
         err_msg = str(e)
-        logger.warning(f"[mini-validation] Judge API 실패 (후보 {candidate_label}): {err_msg}")
+        _log("error", f"[mv-diag {candidate_label}] Judge API 실패: {err_msg}")
         details_failed = [
             {
                 "case_id": r.get("case_id", ""),
@@ -1232,6 +1331,25 @@ async def _judge_candidate_cases_via_api(
         ]
         return details_failed, err_msg
 
+    _log(
+        "info",
+        f"[mv-diag {candidate_label}] Judge 응답 파싱 완료 — {len(judge_cases)}건"
+    )
+    # 응답 첫 2건 미리보기 (서버가 본 generated 와 우리가 보낸 값이 일치하는지 검증)
+    for sample in judge_cases[:2]:
+        sid = sample.get("id", "?")
+        seval = sample.get("answer_evaluation", "?")
+        sreason = (sample.get("answer_evaluation_reason") or "").replace("\n", " ")[:120]
+        sgen_server = (sample.get("generated") or "").replace("\n", " ")[:120]
+        _log(
+            "info",
+            f"  └ 응답 id={sid} {seval} — {sreason!r}"
+        )
+        _log(
+            "info",
+            f"     ↳ 서버가 본 generated[:120]={sgen_server!r}"
+        )
+
     # 1차 매핑: id 로 lookup
     judge_by_id: dict[str, dict] = {}
     for jc in judge_cases:
@@ -1239,10 +1357,11 @@ async def _judge_candidate_cases_via_api(
         if jid and jid not in judge_by_id:
             judge_by_id[jid] = jc
 
-    # 2차 매핑: 응답 길이가 입력과 같으면 row 순서 매핑 (서버가 id 를 못 돌려준 경우)
+    # 2차 매핑: 응답 길이가 입력과 같으면 row 순서 매핑
     fallback_by_index = (len(judge_cases) == len(sim_results))
 
     details = []
+    unmatched = 0
     for i, r in enumerate(sim_results):
         eff_id = effective_ids[i]
         jc = judge_by_id.get(eff_id)
@@ -1251,6 +1370,7 @@ async def _judge_candidate_cases_via_api(
         if not jc:
             evaluation = "평가실패"
             reason = "Judge 응답에 해당 id 없음"
+            unmatched += 1
         else:
             evaluation = jc.get("answer_evaluation") or "평가실패"
             reason = jc.get("answer_evaluation_reason") or ""
@@ -1266,6 +1386,12 @@ async def _judge_candidate_cases_via_api(
         if r.get("error"):
             d["error"] = r["error"]
         details.append(d)
+
+    if unmatched:
+        _log(
+            "warn",
+            f"[mv-diag {candidate_label}] 응답에 매칭되지 않은 id: {unmatched}건 → 평가실패 처리"
+        )
     return details, None
 
 
@@ -1276,6 +1402,7 @@ async def _run_mini_validation(
     task_type: str = "summarization",
     run_id: int = 0,
     generation_task: str = "",
+    diag: list[tuple[str, str]] | None = None,
 ) -> list[dict]:
     """모든 후보에 대해 validation_cases로 시뮬+판정 수행.
     - 워크플로우 시뮬레이션: sim_config (생성 모델, 예: qwen3.5-35B-A3B)
@@ -1285,14 +1412,41 @@ async def _run_mini_validation(
     부착하고 pass_rate 내림차순 정렬하여 반환.
 
     summarization 의 경우 caller 가 사전에 validate_generation_task 를 호출해
-    generation_task 가 API enum 에 포함됨을 보장해야 한다."""
+    generation_task 가 API enum 에 포함됨을 보장해야 한다.
+
+    diag (선택): caller 가 SSE 로그로 yield 할 (level, message) 진단 튜플 리스트.
+    """
     is_classification = task_type == "classification"
 
     for candidate in candidates:
+        cand_label = str(candidate.get("label", ""))
+
         # 1) 시뮬레이션: 모든 validation_case에 대해 generated 수집
         sim_results = await _simulate_candidate_cases(
             candidate, validation_cases, sim_config, concurrency=concurrency
         )
+
+        # 진단: 시뮬레이션 결과 미리보기 (input 데이터 검증)
+        if diag is not None:
+            diag.append((
+                "info",
+                f"[mv-diag {cand_label}] 시뮬레이션 완료 — {len(sim_results)}건"
+            ))
+            for r in sim_results[:3]:
+                cid = r.get("case_id", "")
+                gen_p = (r.get("generated") or "").replace("\n", " ")[:80]
+                gen_len = len(r.get("generated") or "")
+                err = r.get("error")
+                if err:
+                    diag.append((
+                        "warn",
+                        f"  └ 케이스 {cid}: 시뮬 실패 — {err}"
+                    ))
+                else:
+                    diag.append((
+                        "info",
+                        f"  └ 케이스 {cid}: generated({gen_len}자)={gen_p!r}"
+                    ))
 
         # 2) 판정
         judge_error: str | None = None
@@ -1315,10 +1469,11 @@ async def _run_mini_validation(
                 details.append(d)
         else:
             details, judge_error = await _judge_candidate_cases_via_api(
-                candidate_label=str(candidate.get("label", "")),
+                candidate_label=cand_label,
                 sim_results=sim_results,
                 generation_task=generation_task,
                 run_id=run_id,
+                diag=diag,
             )
 
         total = len(details)
@@ -1693,20 +1848,40 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
         if validation_cases and not validation_skip_reason:
             case_ids_str = ", ".join(c.get("case_id", "") for c in validation_cases)
             yield collector.log("info", f"검증 케이스 선별: [{case_ids_str}]")
+
+            # 진단: validation_cases 의 stt/reference 미리보기 (Phase 1 judge JSON 출처)
+            for vc in validation_cases[:3]:
+                vcid = vc.get("case_id", "")
+                vstt = (vc.get("stt") or "").replace("\n", " ")[:80]
+                vref = (vc.get("reference") or "").replace("\n", " ")[:80]
+                yield collector.log(
+                    "info",
+                    f"  └ 케이스 {vcid}: stt={vstt!r} ref={vref!r}"
+                )
+
             if sim_config:
                 sim_model_name = sim_config.get("model", "default")
                 yield collector.log("info", f"Step 4/4: Mini-validation 시작 — 생성 모델: {sim_model_name} ({len(validation_cases)}건 케이스, {len(final_candidates)}개 후보)")
             else:
                 yield collector.log("warn", "Step 4/4: Mini-validation — 시뮬레이션 LLM 미설정, 기본 GPT로 시뮬레이션 수행")
                 yield collector.log("info", f"Mini-validation 시작 ({len(validation_cases)}건 케이스, {len(final_candidates)}개 후보)")
+            yield collector.log(
+                "info",
+                f"Judge API: {JUDGE_API_URL} | model={JUDGE_API_MODEL} | IO Base={JUDGE_IO_DIR}"
+            )
 
+            mv_diag: list[tuple[str, str]] = []
             final_candidates = await _run_mini_validation(
                 final_candidates, validation_cases,
                 sim_config=sim_config,
                 task_type=task_type,
                 run_id=run_id,
                 generation_task=effective_generation_task,
+                diag=mv_diag,
             )
+            # 진단 로그를 SSE 스트림으로 노출 (사용자가 실제 입출력 확인 가능)
+            for _lvl, _msg in mv_diag:
+                yield collector.log(_lvl, _msg)
 
             # 결과 로깅
             for cand in final_candidates:
@@ -1807,13 +1982,17 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                             _ensure_label_schema_in_candidate(cand, cls_label_list, cls_label_defs)
                     # Step 4 재실행: mini-validation
                     yield collector.log("info", f"재시도 mini-validation ({len(validated_retry)}개 후보)")
+                    retry_diag: list[tuple[str, str]] = []
                     validated_retry = await _run_mini_validation(
                         validated_retry, validation_cases,
                         sim_config=sim_config,
                         task_type=task_type,
                         run_id=run_id,
-                        generation_task=task.get("generation_task", "") or "",
+                        generation_task=effective_generation_task,
+                        diag=retry_diag,
                     )
+                    for _lvl, _msg in retry_diag:
+                        yield collector.log(_lvl, _msg)
 
                     for cand in validated_retry:
                         mv = cand.get("mini_validation", {})
