@@ -1,3 +1,4 @@
+import hashlib
 import json
 import time
 from datetime import datetime
@@ -62,6 +63,27 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
             yield done_event("failed")
             return
 
+        # ── 진단: DB에서 읽은 cases 의 generated 핑거프린트 ──
+        # 다른 run 인데 동일하다면 Phase 3 가 generated 를 새로 쓰지 않은 것
+        gen_concat = "\n".join(
+            f"{c.get('case_id','')}|{(c.get('generated') or '')}"
+            for c in cases
+        )
+        gen_fingerprint = hashlib.sha256(gen_concat.encode("utf-8")).hexdigest()[:16]
+        yield collector.log(
+            "info",
+            f"[Phase4 입력 진단] run_id={run_id} cases={len(cases)}건 "
+            f"generated SHA256(앞16)={gen_fingerprint}"
+        )
+        # 첫 2건의 case_id + generated 미리보기 (운영자가 직접 비교)
+        for c in cases[:2]:
+            cid = c.get("case_id", "")
+            gen_preview = (c.get("generated") or "").replace("\n", " ")[:120]
+            yield collector.log(
+                "info",
+                f"  └ case_id={cid}: generated[:120]=\"{gen_preview}{'...' if len(c.get('generated') or '') > 120 else ''}\""
+            )
+
         await db.execute(
             """INSERT INTO phase_results (run_id, phase, status, started_at)
                VALUES (?,4,'running',?)
@@ -122,6 +144,23 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
             yield collector.log("info", f"  ├ URL: {JUDGE_API_URL}")
             yield collector.log("info", f"  ├ Model: {JUDGE_API_MODEL} | Workers: {JUDGE_API_WORKERS}")
             yield collector.log("info", f"  └ IO Base: {JUDGE_IO_DIR}")
+
+            # ── API 호출 직전 DB 상태 스냅샷 (첫 2건) ──
+            # 이 값과 API 응답 후 값이 글자 단위로 같다면:
+            # (a) API 가 정말로 바이패스되어 옛 값이 그대로 노출되거나
+            # (b) Judge LLM 이 결정론적으로 같은 결과를 내고 있음
+            pre_snapshot = []
+            for c in cases[:2]:
+                pre_snapshot.append({
+                    "case_id": c.get("case_id", ""),
+                    "evaluation": c.get("evaluation", "") or "",
+                    "reason": (c.get("reason") or "")[:80],
+                })
+            for s in pre_snapshot:
+                yield collector.log(
+                    "info",
+                    f"  [PRE-API DB] case_id={s['case_id']} evaluation={s['evaluation']!r} reason={s['reason']!r}"
+                )
             yield progress_event(0, total)
 
             # 매 호출마다 고유한 sub_dir (마이크로초 + run_id)
@@ -139,9 +178,13 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
                     None, cases_to_xlsx, cases, str(input_path)
                 )
                 input_size = Path(abs_input).stat().st_size
+                # 파일 내용 해시 — 다른 run 사이에 hash 가 같으면 동일 파일 전송됨을 의미
+                with open(abs_input, "rb") as fh:
+                    input_hash = hashlib.sha256(fh.read()).hexdigest()[:16]
                 yield collector.log(
                     "info",
-                    f"입력 xlsx 작성 완료: {abs_input} ({input_size:,} bytes)"
+                    f"입력 xlsx 작성 완료: {abs_input} "
+                    f"({input_size:,} bytes, SHA256(앞16)={input_hash})"
                 )
 
                 # 2) 호출 직전 시각 기록 (응답 파일 mtime 검증용)
@@ -179,6 +222,8 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
                     return
                 merged_mtime = merged_path.stat().st_mtime
                 merged_size = merged_path.stat().st_size
+                with open(merged_path, "rb") as fh:
+                    merged_hash = hashlib.sha256(fh.read()).hexdigest()[:16]
                 if merged_mtime < wall_started - 1.0:
                     yield collector.log(
                         "warn",
@@ -190,6 +235,7 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
                     yield collector.log(
                         "info",
                         f"merged_final.json 신규 작성 확인됨 — {merged_size:,} bytes, "
+                        f"SHA256(앞16)={merged_hash}, "
                         f"mtime={datetime.fromtimestamp(merged_mtime).isoformat()}"
                     )
 
@@ -207,14 +253,19 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
                 "ok",
                 f"Judge 결과 파싱 완료: {len(judge_cases)}건"
             )
-            # 응답 샘플 (처음 2건) 로그 노출 — API 응답이 실제 LLM 출력임을 사용자가 검증할 수 있도록
+            # 응답 샘플 (처음 2건) 로그 노출 — 서버가 본 generated 와 우리의 generated 가 일치하는지 검증
             for sample in judge_cases[:2]:
                 sid = sample.get("id", "?")
                 seval = sample.get("answer_evaluation", "?")
                 sreason = (sample.get("answer_evaluation_reason") or "")[:120]
+                sgen_server = (sample.get("generated") or "").replace("\n", " ")[:120]
                 yield collector.log(
                     "info",
                     f"  └ 샘플 id={sid}: {seval} — \"{sreason}{'...' if len(sreason) >= 120 else ''}\""
+                )
+                yield collector.log(
+                    "info",
+                    f"     ↳ 서버가 본 generated[:120]=\"{sgen_server}{'...' if len(sample.get('generated') or '') > 120 else ''}\""
                 )
 
             # merged_final.json 의 cases 를 case_id 기준으로 매핑
@@ -226,6 +277,8 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
 
             unmatched = 0
             processed = 0
+            update_zero_rowcount = 0
+            update_total_rowcount = 0
             for case in cases:
                 cid = str(case.get("case_id", ""))
                 jc = judge_map.get(cid)
@@ -237,14 +290,64 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
                     evaluation = jc.get("answer_evaluation") or "평가실패"
                     reason = jc.get("answer_evaluation_reason") or ""
 
-                await db.execute(
+                cursor = await db.execute(
                     "UPDATE case_results SET evaluation=?, reason=? WHERE run_id=? AND case_id=?",
                     (evaluation, reason, run_id, case["case_id"])
                 )
+                rc = cursor.rowcount if cursor.rowcount is not None else 0
+                update_total_rowcount += rc
+                if rc == 0:
+                    update_zero_rowcount += 1
                 processed += 1
                 yield progress_event(processed, total)
 
             await db.commit()
+
+            yield collector.log(
+                "info",
+                f"[UPDATE 결과] 영향받은 총 row 수: {update_total_rowcount}, "
+                f"rowcount=0 인 케이스: {update_zero_rowcount}/{processed}"
+            )
+            if update_zero_rowcount > 0:
+                yield collector.log(
+                    "error",
+                    f"⚠ {update_zero_rowcount}건의 UPDATE 가 0 row 에 영향 — "
+                    f"WHERE run_id={run_id} AND case_id=... 매칭 실패. "
+                    f"이 경우 옛 evaluation/reason 이 그대로 노출됩니다."
+                )
+
+            # ── API 응답 + UPDATE 직후 DB 상태 스냅샷 (PRE 와 동일한 첫 2건) ──
+            if pre_snapshot:
+                pre_ids = [s["case_id"] for s in pre_snapshot]
+                placeholders = ",".join("?" * len(pre_ids))
+                async with db.execute(
+                    f"SELECT case_id, evaluation, reason FROM case_results "
+                    f"WHERE run_id=? AND case_id IN ({placeholders})",
+                    (run_id, *pre_ids)
+                ) as scur:
+                    post_rows = {r["case_id"]: dict(r) for r in await scur.fetchall()}
+                changed_count = 0
+                for s in pre_snapshot:
+                    pr = post_rows.get(s["case_id"], {})
+                    post_eval = (pr.get("evaluation") or "")
+                    post_reason = (pr.get("reason") or "")[:80]
+                    changed = (s["evaluation"] != post_eval) or (s["reason"] != post_reason)
+                    if changed:
+                        changed_count += 1
+                    marker = "✎ 변경" if changed else "= 동일"
+                    yield collector.log(
+                        "info",
+                        f"  [POST-API DB] {marker} case_id={s['case_id']} "
+                        f"evaluation={post_eval!r} reason={post_reason!r}"
+                    )
+                if changed_count == 0:
+                    yield collector.log(
+                        "warn",
+                        "⚠ Pre-API 와 Post-API DB 가 첫 2건 모두 동일합니다. "
+                        "다음 중 하나입니다: (1) Judge LLM 결정론적 응답이 옛 값과 같음, "
+                        "(2) Judge API 서버가 캐시 반환, "
+                        "(3) UPDATE 가 0 row 에 영향 (위 rowcount 로그 확인)."
+                    )
 
             if unmatched:
                 yield collector.log("warn", f"Judge 응답에 매칭되지 않은 id: {unmatched}건 → 평가실패 처리")

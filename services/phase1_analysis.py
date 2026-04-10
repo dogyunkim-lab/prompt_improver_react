@@ -1,10 +1,12 @@
 import asyncio
 import json
 import os
+from collections import Counter
 from datetime import datetime
 from typing import AsyncGenerator
 from database import get_db
 from services.gpt_client import call_gpt, get_task_gpt_config, get_task_type, get_task_labels
+from services.judge_api import JudgeAPIError, validate_generation_task
 from services.phase4_judge import _exact_match_classify
 from services.sse_helpers import log_event, progress_event, result_event, done_event, case_event, LogCollector
 
@@ -214,6 +216,45 @@ async def run_phase1(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
             eval_field = _detect_eval_field(judge_data)
             reason_field = _detect_reason_field(judge_data)
         yield collector.log("info", f"판정 필드: '{eval_field}' | 사유 필드: '{reason_field}'")
+
+        # ── Summarization: Judge JSON 의 generation_task 를 tasks 테이블과 동기화 ──
+        # Phase 2 mini-validation 의 사전 검증이 tasks.generation_task 를 enum 검사하므로,
+        # Judge JSON 에 유효한 값이 있으면 tasks 에 자동 반영해 스킵을 방지한다.
+        if not is_classification:
+            judge_gen_tasks = [
+                str(c.get("generation_task", "")).strip()
+                for c in judge_data
+                if str(c.get("generation_task", "")).strip()
+            ]
+            if judge_gen_tasks:
+                most_common_gt, mc_count = Counter(judge_gen_tasks).most_common(1)[0]
+                try:
+                    valid_gt = validate_generation_task(most_common_gt)
+                except JudgeAPIError as e:
+                    yield collector.log(
+                        "warn",
+                        f"Judge JSON 의 generation_task '{most_common_gt}' 가 Judge API enum 에 없습니다 — Task 설정값 유지: {e}"
+                    )
+                else:
+                    current_gt = (task.get("generation_task") or "").strip()
+                    if valid_gt != current_gt:
+                        await db.execute(
+                            "UPDATE tasks SET generation_task=? WHERE id=?",
+                            (valid_gt, run["task_id"])
+                        )
+                        await db.commit()
+                        task["generation_task"] = valid_gt
+                        generation_task = valid_gt
+                        yield collector.log(
+                            "info",
+                            f"generation_task 동기화: '{current_gt or '(빈 값)'}' → '{valid_gt}' "
+                            f"(Judge JSON {mc_count}/{len(judge_gen_tasks)}건 기준)"
+                        )
+            else:
+                yield collector.log(
+                    "warn",
+                    "Judge JSON 에 generation_task 필드가 비어 있습니다 — Phase 2 mini-validation 이 스킵될 수 있습니다."
+                )
 
         # 오답/과답 케이스 추출 (분류는 과답 개념 없음 → 오답만)
         error_values = ("오답",) if is_classification else ("오답", "과답")

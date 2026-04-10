@@ -934,6 +934,37 @@ async def _select_validation_cases(
         await db.close()
 
 
+async def _resolve_generation_task_from_cases(run_id: int) -> str | None:
+    """case_results 의 generation_task 컬럼에서 가장 흔한 값을 반환.
+    Phase 1 이 Judge JSON 으로부터 케이스별로 채워둔 값이므로,
+    tasks.generation_task 가 비어있을 때 폴백으로 사용한다.
+    Judge API enum 검증을 통과한 값만 반환하며, 없으면 None.
+    """
+    from collections import Counter
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT generation_task FROM case_results WHERE run_id=?",
+            (run_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+        values = [
+            (r["generation_task"] or "").strip()
+            for r in rows
+            if (r["generation_task"] or "").strip()
+        ]
+        if not values:
+            return None
+        for candidate, _count in Counter(values).most_common():
+            try:
+                return validate_generation_task(candidate)
+            except JudgeAPIError:
+                continue
+        return None
+    finally:
+        await db.close()
+
+
 def _build_retry_feedback(candidates: list) -> str:
     """Mini-validation 전체 실패 시, 재시도에 주입할 피드백 텍스트 생성."""
     lines = [
@@ -1591,16 +1622,41 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
         validation_cases = await _select_validation_cases(run_id, improvable_cases, 3)
 
         # ── Summarization: generation_task 사전 검증 (Judge API enum) ──
+        # 우선 tasks.generation_task 를 검사하고, 비어있거나 enum 에 없으면
+        # case_results 의 가장 흔한 값으로 자동 보정한다 (Judge JSON 출처).
         validation_skip_reason: str | None = None
+        effective_generation_task = (task.get("generation_task", "") or "").strip()
         if validation_cases and not is_classification:
             try:
-                validate_generation_task(task.get("generation_task", "") or "")
-            except JudgeAPIError as e:
-                validation_skip_reason = str(e)
-                yield collector.log(
-                    "error",
-                    f"Mini-validation 스킵: Judge API generation_task 검증 실패 — {validation_skip_reason}"
-                )
+                validate_generation_task(effective_generation_task)
+            except JudgeAPIError:
+                # case_results 폴백
+                fallback_gt = await _resolve_generation_task_from_cases(run_id)
+                if fallback_gt:
+                    yield collector.log(
+                        "warn",
+                        f"tasks.generation_task 가 비어있거나 enum 외 — case_results 기준으로 '{fallback_gt}' 사용"
+                    )
+                    effective_generation_task = fallback_gt
+                    # tasks 테이블에도 동기화 (다음 실행을 위해)
+                    try:
+                        adb = await get_db()
+                        await adb.execute(
+                            "UPDATE tasks SET generation_task=? WHERE id=?",
+                            (fallback_gt, task["id"])
+                        )
+                        await adb.commit()
+                    except Exception as _e:
+                        yield collector.log("warn", f"tasks 동기화 실패(무시): {_e}")
+                else:
+                    try:
+                        validate_generation_task(effective_generation_task)
+                    except JudgeAPIError as e:
+                        validation_skip_reason = str(e)
+                        yield collector.log(
+                            "error",
+                            f"Mini-validation 스킵: Judge API generation_task 검증 실패 — {validation_skip_reason}"
+                        )
 
         if validation_cases and not validation_skip_reason:
             case_ids_str = ", ".join(c.get("case_id", "") for c in validation_cases)
@@ -1617,7 +1673,7 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
                 sim_config=sim_config,
                 task_type=task_type,
                 run_id=run_id,
-                generation_task=task.get("generation_task", "") or "",
+                generation_task=effective_generation_task,
             )
 
             # 결과 로깅
