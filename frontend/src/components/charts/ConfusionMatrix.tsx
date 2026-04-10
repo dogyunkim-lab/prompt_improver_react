@@ -56,7 +56,7 @@ export const ConfusionMatrix: React.FC<ConfusionMatrixProps> = React.memo(({ dat
       <table className="border-collapse text-[11px]">
         <thead>
           <tr>
-            <th className="px-2 py-1 text-left font-semibold text-warm-muted">
+            <th className="sticky left-0 z-20 bg-warm-card px-2 py-1 text-left font-semibold text-warm-muted border-r border-warm-border">
               Ref \ Pred
             </th>
             {labels.map((l) => (
@@ -85,7 +85,7 @@ export const ConfusionMatrix: React.FC<ConfusionMatrixProps> = React.memo(({ dat
             return (
               <tr key={`r-${rowLabel}`}>
                 <th
-                  className="px-2 py-1 text-left font-semibold text-warm-text border-r border-warm-border whitespace-nowrap"
+                  className="sticky left-0 z-10 bg-warm-card px-2 py-1 text-left font-semibold text-warm-text border-r border-warm-border whitespace-nowrap"
                   title={`정답 라벨: ${rowLabel}`}
                 >
                   {rowLabel}

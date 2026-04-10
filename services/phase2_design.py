@@ -820,17 +820,25 @@ async def _repair_candidate(
 
 import re as _re
 
-class SafeDict(dict):
-    """format_map용: 알 수 없는 {var}는 그대로 유지, KeyError 방지."""
-    def __missing__(self, key):
-        return '{' + key + '}'
+def _render_dify_prompt(text: str, pool: dict) -> str:
+    """Dify 스타일 {{var}} 자리표시자만 pool 값으로 치환.
 
+    중요: Python의 str.format_map 은 모든 단일 중괄호 `{...}` 를 placeholder 로 보기 때문에
+    프롬프트 본문에 들어있는 리터럴 JSON (예: `{"label": true/false, ...}`) 의 콜론을
+    format specifier 로 잘못 해석하여 "Invalid format specifier" 예외를 일으킨다.
+    이 함수는 Dify 규칙인 이중 중괄호 `{{var}}` 에만 매칭되므로 리터럴 JSON 본문은 건드리지 않는다.
+    pool 에 없는 변수는 원문 그대로 유지된다.
+    """
+    if not text:
+        return ""
 
-def _dify_to_python_vars(text: str) -> str:
-    """Dify 스타일 {{var}} → Python format 스타일 {var} 변환.
-    GPT가 생성한 프롬프트는 Dify 변수 규칙(이중 중괄호)을 따르므로
-    시뮬레이션 시 Python format_map이 치환할 수 있도록 단일 중괄호로 변환한다."""
-    return _re.sub(r'\{\{(\w+)\}\}', r'{\1}', text)
+    def repl(m: "_re.Match[str]") -> str:
+        var = m.group(1)
+        if var in pool:
+            return str(pool[var])
+        return m.group(0)  # 미지 변수는 {{var}} 원문 그대로 유지
+
+    return _re.sub(r'\{\{(\w+)\}\}', repl, text)
 
 
 def _extract_node_output(raw: str, output_var: str) -> str:
@@ -1033,10 +1041,6 @@ async def _simulate_workflow_for_case(
             if legacy:
                 usr_prompt = legacy
 
-        # Dify 스타일 {{var}} → Python {var} 변환
-        sys_norm = _dify_to_python_vars(sys_prompt)
-        usr_norm = _dify_to_python_vars(usr_prompt)
-
         # ── 변수 풀 보강: input_vars 선언에 맞춰 이전 노드 출력 매핑 ──
         effective_pool = dict(pool)
         input_vars = node.get("input_vars", [])
@@ -1058,7 +1062,8 @@ async def _simulate_workflow_for_case(
                 logger.info(f"[mini-sim] 노드 {node_label}: input_var '{var_name}' → 직전 노드 출력으로 대체")
 
         # 프롬프트 내 {{var}} 자리 중 아직 pool에 없는 것도 매핑
-        all_placeholders = set(_re.findall(r'\{(\w+)\}', sys_norm + " " + usr_norm))
+        # (Dify 스타일 이중 중괄호만 인식하므로 리터럴 JSON `{...}` 은 무시됨)
+        all_placeholders = set(_re.findall(r'\{\{(\w+)\}\}', sys_prompt + " " + usr_prompt))
         for ph in all_placeholders:
             if ph in effective_pool or ph in _CASE_DATA_KEYS:
                 continue
@@ -1074,8 +1079,8 @@ async def _simulate_workflow_for_case(
                 effective_pool[ph] = node_outputs[-1][1]
                 logger.info(f"[mini-sim] 노드 {node_label}: 미지 변수 '{ph}' → 직전 노드 출력으로 대체")
 
-        sys_rendered = sys_norm.format_map(SafeDict(**effective_pool)) if sys_norm else ""
-        usr_rendered = usr_norm.format_map(SafeDict(**effective_pool)) if usr_norm else ""
+        sys_rendered = _render_dify_prompt(sys_prompt, effective_pool)
+        usr_rendered = _render_dify_prompt(usr_prompt, effective_pool)
 
         messages = []
         if sys_rendered:
