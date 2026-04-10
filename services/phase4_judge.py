@@ -1,12 +1,18 @@
 import json
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import AsyncGenerator
+from config import JUDGE_API_URL, JUDGE_API_MODEL, JUDGE_API_WORKERS, JUDGE_IO_DIR
 from database import get_db
 from services.gpt_client import get_task_type
 from services.delta import compute_and_save_deltas, aggregate_scores
 from services.judge_api import (
     JudgeAPIError,
-    run_judge_for_cases,
+    cases_to_xlsx,
+    call_judge_api,
+    ensure_io_dir,
+    read_merged_final,
     validate_generation_task,
 )
 from services.sse_helpers import log_event, progress_event, result_event, done_event, LogCollector
@@ -113,22 +119,103 @@ async def run_phase4(run_id: int) -> AsyncGenerator[str, None]:
                 return
 
             yield collector.log("info", f"Judge API 호출 시작: {total}건 (generation_task={gt})")
+            yield collector.log("info", f"  ├ URL: {JUDGE_API_URL}")
+            yield collector.log("info", f"  ├ Model: {JUDGE_API_MODEL} | Workers: {JUDGE_API_WORKERS}")
+            yield collector.log("info", f"  └ IO Base: {JUDGE_IO_DIR}")
             yield progress_event(0, total)
 
-            sub_dir = f"phase4/run_{run_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            # 매 호출마다 고유한 sub_dir (마이크로초 + run_id)
+            ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')
+            sub_dir = f"phase4/run_{run_id}_{ts}"
+            request_id = f"run{run_id}_{ts}"
+
             try:
-                judge_cases, judge_summary = await run_judge_for_cases(
-                    cases=cases,
-                    generation_task=gt,
-                    sub_dir=sub_dir,
-                    request_id=f"run{run_id}",
+                # 1) input.xlsx 작성
+                import asyncio as _asyncio
+                work_dir = ensure_io_dir(sub_dir)
+                input_path = work_dir / "input.xlsx"
+                loop = _asyncio.get_running_loop()
+                abs_input = await loop.run_in_executor(
+                    None, cases_to_xlsx, cases, str(input_path)
                 )
+                input_size = Path(abs_input).stat().st_size
+                yield collector.log(
+                    "info",
+                    f"입력 xlsx 작성 완료: {abs_input} ({input_size:,} bytes)"
+                )
+
+                # 2) 호출 직전 시각 기록 (응답 파일 mtime 검증용)
+                call_started = time.monotonic()
+                wall_started = time.time()
+
+                yield collector.log("info", f"Judge API POST 전송... (request_id={request_id})")
+
+                api_resp = await call_judge_api(
+                    input_file=abs_input,
+                    generation_task=gt,
+                    output_dir=str(work_dir.resolve()),
+                    request_id=request_id,
+                )
+
+                elapsed = time.monotonic() - call_started
+                # 서버측 duration / status 노출 (있으면)
+                server_status = api_resp.get("status", "?") if isinstance(api_resp, dict) else "?"
+                server_duration = api_resp.get("total_duration", "?") if isinstance(api_resp, dict) else "?"
+                server_retry = api_resp.get("retry_count", "?") if isinstance(api_resp, dict) else "?"
+                yield collector.log(
+                    "ok",
+                    f"Judge API 응답 수신 — HTTP 200, 클라이언트 소요 {elapsed:.2f}s, "
+                    f"서버 status={server_status}, 서버 duration={server_duration}, retry={server_retry}"
+                )
+
+                # 3) merged_final.json 검증 (mtime 이 호출 시각 이후인지)
+                merged_path = Path(work_dir) / "merged_final.json"
+                if not merged_path.exists():
+                    yield collector.log(
+                        "error",
+                        f"merged_final.json 이 생성되지 않았습니다: {merged_path}"
+                    )
+                    yield done_event("failed")
+                    return
+                merged_mtime = merged_path.stat().st_mtime
+                merged_size = merged_path.stat().st_size
+                if merged_mtime < wall_started - 1.0:
+                    yield collector.log(
+                        "warn",
+                        f"merged_final.json 의 수정 시각이 호출 이전입니다 — 캐시된 파일일 수 있음 "
+                        f"(mtime={datetime.fromtimestamp(merged_mtime).isoformat()}, "
+                        f"call_started={datetime.fromtimestamp(wall_started).isoformat()})"
+                    )
+                else:
+                    yield collector.log(
+                        "info",
+                        f"merged_final.json 신규 작성 확인됨 — {merged_size:,} bytes, "
+                        f"mtime={datetime.fromtimestamp(merged_mtime).isoformat()}"
+                    )
+
+                # 4) merged_final.json 파싱
+                judge_summary, judge_cases = await loop.run_in_executor(
+                    None, read_merged_final, str(work_dir.resolve())
+                )
+
             except JudgeAPIError as e:
                 yield collector.log("error", f"Judge API 실패: {e}")
                 yield done_event("failed")
                 return
 
-            yield collector.log("ok", f"Judge API 응답 수신: {len(judge_cases)}건")
+            yield collector.log(
+                "ok",
+                f"Judge 결과 파싱 완료: {len(judge_cases)}건"
+            )
+            # 응답 샘플 (처음 2건) 로그 노출 — API 응답이 실제 LLM 출력임을 사용자가 검증할 수 있도록
+            for sample in judge_cases[:2]:
+                sid = sample.get("id", "?")
+                seval = sample.get("answer_evaluation", "?")
+                sreason = (sample.get("answer_evaluation_reason") or "")[:120]
+                yield collector.log(
+                    "info",
+                    f"  └ 샘플 id={sid}: {seval} — \"{sreason}{'...' if len(sreason) >= 120 else ''}\""
+                )
 
             # merged_final.json 의 cases 를 case_id 기준으로 매핑
             judge_map: dict[str, dict] = {}
