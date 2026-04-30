@@ -29,6 +29,7 @@ STRATEGY_PROMPT_PATH_CLASSIFICATION = "prompts/phase2_strategy_classification.tx
 CANDIDATE_PROMPT_PATH = "prompts/phase2_candidate.txt"
 CANDIDATE_PROMPT_PATH_CLASSIFICATION = "prompts/phase2_candidate_classification.txt"
 REPAIR_PROMPT_PATH = "prompts/phase2_repair.txt"
+VALIDATION_SELECT_PROMPT_PATH = "prompts/phase2_validation_select.txt"
 ANCHORS_DIR = "prompts/anchors"
 
 NODE_LABELS = ["A", "B", "C"]
@@ -911,42 +912,165 @@ def _extract_node_output(raw: str, output_var: str) -> str:
 
 
 async def _select_validation_cases(
-    run_id: int, improvable_cases: list, max_cases: int = 3
+    run_id: int,
+    improvable_cases: list,
+    max_cases: int = 3,
+    phase1_summary: dict | None = None,
+    final_candidates: list | None = None,
+    gpt_config: dict | None = None,
+    reasoning: str = "medium",
 ) -> list[dict]:
     """Phase 1 오답 케이스 중 validation용 케이스 선별.
+    GPT 기반으로 오류 패턴 분포 + 후보 전략을 고려하여 대표 케이스를 선택.
+    GPT 실패 시 error_pattern_ranking 빈도 비례 fallback.
     DB에서 full stt/reference/keywords/generation_task 조회."""
     if not improvable_cases:
         return []
 
-    # 우선순위: prompt_missing > error_pattern 빈도순(리스트 순서)
-    sorted_cases = sorted(
-        improvable_cases,
-        key=lambda c: (0 if c.get("bucket") == "prompt_missing" else 1),
-    )
-    selected = sorted_cases[:max_cases]
+    selected_case_ids: list[str] = []
 
-    case_ids = [c["case_id"] for c in selected]
-    if not case_ids:
+    # ── GPT 기반 선택 시도 ──
+    if phase1_summary and final_candidates:
+        try:
+            selected_case_ids = await _gpt_select_validation_cases(
+                improvable_cases, max_cases,
+                phase1_summary, final_candidates,
+                gpt_config=gpt_config, reasoning=reasoning,
+            )
+        except Exception:
+            logger.warning("[ValidationSelect] GPT 선택 실패 — fallback 사용", exc_info=True)
+            selected_case_ids = []
+
+    # ── Fallback: error_pattern_ranking 빈도 비례 선택 ──
+    if not selected_case_ids:
+        selected_case_ids = _fallback_select_by_pattern_ranking(
+            improvable_cases, max_cases, phase1_summary,
+        )
+
+    if not selected_case_ids:
         return []
 
+    # ── DB에서 full 데이터 조회 ──
     db = await get_db()
     try:
-        placeholders = ",".join("?" for _ in case_ids)
+        placeholders = ",".join("?" for _ in selected_case_ids)
         async with db.execute(
             f"""SELECT case_id, stt, reference, keywords, generation_task
                 FROM case_results WHERE run_id=? AND case_id IN ({placeholders})""",
-            [run_id] + case_ids,
+            [run_id] + selected_case_ids,
         ) as cursor:
             rows = {row["case_id"]: dict(row) for row in await cursor.fetchall()}
 
-        result = []
-        for c in selected:
-            db_row = rows.get(c["case_id"])
-            if db_row:
-                result.append(db_row)
-        return result
+        # 선택 순서 유지
+        return [rows[cid] for cid in selected_case_ids if cid in rows]
     finally:
         await db.close()
+
+
+async def _gpt_select_validation_cases(
+    improvable_cases: list,
+    max_cases: int,
+    phase1_summary: dict,
+    final_candidates: list,
+    gpt_config: dict | None = None,
+    reasoning: str = "medium",
+) -> list[str]:
+    """GPT에게 오류 패턴 분포 + 후보 전략을 제공하여 검증 케이스를 선별."""
+    error_pattern_ranking = phase1_summary.get("error_pattern_ranking", [])
+    bucket_counts = phase1_summary.get("bucket_counts", {})
+
+    # 후보 전략 요약 (토큰 절약을 위해 핵심 필드만)
+    candidate_strategies = []
+    for cand in final_candidates:
+        candidate_strategies.append({
+            "label": cand.get("label", ""),
+            "focus_patterns": cand.get("focus_patterns", []),
+            "rationale": cand.get("rationale", ""),
+        })
+
+    # 이용 가능 케이스 목록 (최대 30건, 토큰 절약)
+    available_cases = []
+    for c in improvable_cases[:30]:
+        available_cases.append({
+            "case_id": c.get("case_id", ""),
+            "bucket": c.get("bucket", ""),
+            "error_pattern": c.get("error_pattern", ""),
+            "analysis_summary": c.get("analysis_summary", ""),
+        })
+
+    template = _load_prompt(VALIDATION_SELECT_PROMPT_PATH)
+    prompt = template.format(
+        max_cases=max_cases,
+        error_pattern_ranking=json.dumps(error_pattern_ranking[:10], ensure_ascii=False, indent=2),
+        bucket_counts=json.dumps(bucket_counts, ensure_ascii=False),
+        candidate_strategies=json.dumps(candidate_strategies, ensure_ascii=False, indent=2),
+        available_cases=json.dumps(available_cases, ensure_ascii=False, indent=2),
+    )
+
+    raw = await call_gpt(
+        [{"role": "user", "content": prompt}],
+        reasoning=reasoning,
+        **(gpt_config or {}),
+    )
+    result = _extract_json(raw)
+    ids = result.get("selected_case_ids", [])
+
+    if not isinstance(ids, list) or not ids:
+        raise ValueError("GPT가 유효한 selected_case_ids를 반환하지 않음")
+
+    # 유효한 case_id만 필터링
+    valid_ids = {c.get("case_id") for c in improvable_cases}
+    filtered = [cid for cid in ids if cid in valid_ids]
+
+    if filtered:
+        selection_reasoning = result.get("selection_reasoning", "")
+        if selection_reasoning:
+            logger.info(f"[ValidationSelect] GPT 선택 근거: {selection_reasoning}")
+    return filtered[:max_cases]
+
+
+def _fallback_select_by_pattern_ranking(
+    improvable_cases: list,
+    max_cases: int,
+    phase1_summary: dict | None,
+) -> list[str]:
+    """error_pattern_ranking 빈도 비례로 케이스 선택 (GPT 실패 시 fallback)."""
+    if not phase1_summary:
+        # phase1_summary도 없으면 리스트 순서대로
+        return [c["case_id"] for c in improvable_cases[:max_cases]]
+
+    error_pattern_ranking = phase1_summary.get("error_pattern_ranking", [])
+    if not error_pattern_ranking:
+        return [c["case_id"] for c in improvable_cases[:max_cases]]
+
+    selected_ids: list[str] = []
+    selected_set: set[str] = set()
+
+    # 상위 패턴 순으로 매칭 케이스 1개씩 선택
+    for pattern_info in error_pattern_ranking:
+        if len(selected_ids) >= max_cases:
+            break
+        pattern = pattern_info.get("pattern", "")
+        for c in improvable_cases:
+            cid = c.get("case_id", "")
+            if cid in selected_set:
+                continue
+            if c.get("error_pattern") == pattern:
+                selected_ids.append(cid)
+                selected_set.add(cid)
+                break
+
+    # 아직 부족하면 남은 케이스에서 순서대로 보충
+    if len(selected_ids) < max_cases:
+        for c in improvable_cases:
+            if len(selected_ids) >= max_cases:
+                break
+            cid = c.get("case_id", "")
+            if cid not in selected_set:
+                selected_ids.append(cid)
+                selected_set.add(cid)
+
+    return selected_ids
 
 
 async def _resolve_generation_task_from_cases(run_id: int) -> str | None:
@@ -1811,7 +1935,13 @@ async def run_phase2(run_id: int, reasoning: str = "high") -> AsyncGenerator[str
         # ════════════════════════════════════════════════════════════════════
         mini_validation_summary = {"enabled": False, "validation_case_count": 0, "candidate_results": []}
 
-        validation_cases = await _select_validation_cases(run_id, improvable_cases, 3)
+        validation_cases = await _select_validation_cases(
+            run_id, improvable_cases, 3,
+            phase1_summary=phase1_summary,
+            final_candidates=final_candidates,
+            gpt_config=gpt_config,
+            reasoning="medium",
+        )
 
         # ── Summarization: generation_task 사전 검증 (Judge API enum) ──
         # 우선 tasks.generation_task 를 검사하고, 비어있거나 enum 에 없으면
